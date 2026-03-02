@@ -41,6 +41,19 @@ const EmptyId NodeId = 9999
 
 type State int
 
+func (s State) String() string {
+	if s == Follower {
+		return "Follower"
+	}
+	if s == Candidate {
+		return "Candidate"
+	}
+	if s == Leader {
+		return "Leader"
+	}
+	return "UNKNOWN"
+}
+
 const (
 	Follower  State = iota
 	Candidate State = iota

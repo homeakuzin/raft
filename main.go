@@ -10,16 +10,18 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 )
 
-var electionTimeout = 1 * time.Second
-var electionTimeoutDelta = 250 * time.Millisecond
+var heartbeatPeriod = 100 * time.Millisecond
+var electionTimeout = 2000 * time.Millisecond
+var electionTimeoutDelta = 500 * time.Millisecond
 
 func generateElectionTimeout() time.Duration {
-	return electionTimeout
+	// return electionTimeout
 	delta := time.Duration(rand.Int63n(int64(electionTimeoutDelta)*2) - int64(electionTimeoutDelta))
 	return electionTimeout + delta
 }
@@ -31,11 +33,13 @@ var nodes = map[NodeId]string{
 }
 
 type Node struct {
-	Id          NodeId
-	VotedFor    NodeId
-	VotedForMu  sync.Mutex
-	CurrentTerm int
-	State       State
+	Id            NodeId
+	VotedFor      NodeId
+	VotedForMu    sync.Mutex
+	CurrentTerm   int
+	State         State
+	ElectionTimer *time.Timer
+	leaderIdCh    chan NodeId
 }
 
 func (n *Node) Run() error {
@@ -50,10 +54,27 @@ func (n *Node) Run() error {
 
 	go n.runServer(host)
 
-	electionTimer := time.NewTimer(generateElectionTimeout())
+	n.leaderIdCh = make(chan NodeId)
+	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
+	heartbeatTimer := time.NewTimer(heartbeatPeriod)
 
 	for {
+		heartbeatCh := make(<-chan time.Time)
 		if n.State == Leader {
+			heartbeatCh = heartbeatTimer.C
+		}
+		select {
+		case <-n.leaderIdCh:
+			n.State = Follower
+		case <-n.ElectionTimer.C:
+			n.State = Candidate
+		case <-heartbeatCh:
+		}
+		n.ElectionTimer.Reset(generateElectionTimeout())
+		log.Printf("State => %s", n.State)
+
+		if n.State == Leader {
+			time.Sleep(heartbeatPeriod)
 			ctx := context.Background()
 			wg := sync.WaitGroup{}
 			for i := range otherNodeIds {
@@ -69,26 +90,29 @@ func (n *Node) Run() error {
 					_ = result
 				}()
 			}
-		} else {
-			<-electionTimer.C
-
-			log.Printf("starting an election")
+			wg.Wait()
+			heartbeatTimer.Reset(heartbeatPeriod)
+		} else if n.State == Candidate {
 			n.VotedFor = EmptyId
 			n.CurrentTerm++
-			n.State = Candidate
 
+			requestVoteCtx, requestVoteCancel := context.WithCancel(context.Background())
+			go func() {
+				select {
+				case <-n.leaderIdCh:
+					requestVoteCancel()
+				case <-requestVoteCtx.Done():
+				}
+			}()
 			wg := sync.WaitGroup{}
-			ctx := context.Background()
-
 			votes := make(chan RequestVoteResult, len(otherNodeIds))
-
 			for i := range otherNodeIds {
 				nodeHost := nodes[otherNodeIds[i]]
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					log.Printf("issuing RequestVote to node-%d", otherNodeIds[i])
-					result, err := n.issueRequestVote(ctx, nodeHost)
+					result, err := n.issueRequestVote(requestVoteCtx, nodeHost)
 					if err != nil {
 						log.Printf("could not issue RequestVote to %s: %s", nodeHost, err.Error())
 					} else {
@@ -99,10 +123,11 @@ func (n *Node) Run() error {
 
 			wg.Wait()
 			close(votes)
+			requestVoteCancel()
 
 			votesNumCh := make(chan int)
 			go func() {
-				votesNum := 0
+				votesNum := 1
 				for result := range votes {
 					if result.VoteGranted {
 						votesNum++
@@ -117,7 +142,6 @@ func (n *Node) Run() error {
 				log.Printf("I am a leader now")
 				n.State = Leader
 			}
-			electionTimer.Reset(generateElectionTimeout())
 		}
 	}
 }
@@ -156,38 +180,37 @@ func (n *Node) issueRequestVote(ctx context.Context, host string) (result Reques
 	return
 }
 
-func (n *Node) issueAppendEntries(ctx context.Context, host string) (result AppendEntriesResult, err error) {
+func (n *Node) issueAppendEntries(ctx context.Context, host string) (AppendEntriesResult, error) {
+	var result AppendEntriesResult
 	appendEntries := AppendEntries{
 		Term:     n.CurrentTerm,
 		LeaderId: n.Id,
 	}
 	body, err := json.Marshal(&appendEntries)
 	if err != nil {
-		return
+		return result, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/append-entries", host), bytes.NewBuffer(body))
 	if err != nil {
-		return
+		return result, err
 	}
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return
+		return result, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		err = fmt.Errorf("node returned %d status code", resp.StatusCode)
-		return
+		return result, err
 	}
 	resultBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return
+		return result, err
 	}
-	if err = json.Unmarshal(resultBytes, &result); err != nil {
-		return
-	}
-	return
+	err = json.Unmarshal(resultBytes, &result)
+	return result, err
 }
 
 func (n *Node) requestVoteHandler(w http.ResponseWriter, r *http.Request) {
@@ -226,8 +249,41 @@ func (n *Node) requestVoteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (n *Node) appendEntriesHandler(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("could not read body: %s", err.Error())
+		w.WriteHeader(500)
+		return
+	}
+	var appendEntries AppendEntries
+	if err := json.Unmarshal(body, &appendEntries); err != nil {
+		log.Printf("invalid body: %s", err.Error())
+		w.WriteHeader(400)
+		return
+	}
+	response := AppendEntriesResult{Term: n.CurrentTerm}
+	if appendEntries.Term >= n.CurrentTerm {
+		n.leaderIdCh <- appendEntries.LeaderId
+		response.Success = true
+	}
+	responseBody, err := json.Marshal(&response)
+	if err != nil {
+		log.Printf("could not serialize response body: %s", err.Error())
+		w.WriteHeader(500)
+		return
+	}
+	if _, err := w.Write(responseBody); err != nil {
+		log.Printf("could not write response body: %s", err.Error())
+		w.WriteHeader(500)
+		return
+	}
+}
+
 func (n *Node) runServer(host string) {
+	log.SetOutput(os.Stdout)
 	http.HandleFunc("POST /request-vote", n.requestVoteHandler)
+	http.HandleFunc("POST /append-entries", n.appendEntriesHandler)
 	if err := http.ListenAndServe(host, nil); err != nil {
 		log.Fatal(err.Error())
 	}
