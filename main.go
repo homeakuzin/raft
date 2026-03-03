@@ -16,9 +16,11 @@ import (
 	"time"
 )
 
-var heartbeatPeriod = 100 * time.Millisecond
-var electionTimeout = 2000 * time.Millisecond
-var electionTimeoutDelta = 500 * time.Millisecond
+var heartbeatPeriod = 50 * time.Millisecond
+var electionTimeout = 200 * time.Millisecond
+var electionTimeoutDelta = 50 * time.Millisecond
+
+var flagVerbose = flag.Bool("v", false, "enables verbose output")
 
 func generateElectionTimeout() time.Duration {
 	// return electionTimeout
@@ -33,13 +35,13 @@ var nodes = map[NodeId]string{
 }
 
 type Node struct {
-	Id            NodeId
-	VotedFor      NodeId
-	VotedForMu    sync.Mutex
-	CurrentTerm   int
-	State         State
-	ElectionTimer *time.Timer
-	leaderIdCh    chan NodeId
+	Id              NodeId
+	VotedFor        NodeId
+	VotedForMu      sync.Mutex
+	CurrentTerm     int
+	State           State
+	ElectionTimer   *time.Timer
+	appendEntriesCh chan AppendEntries
 }
 
 func (n *Node) Run() error {
@@ -54,9 +56,20 @@ func (n *Node) Run() error {
 
 	go n.runServer(host)
 
-	n.leaderIdCh = make(chan NodeId)
+	n.appendEntriesCh = make(chan AppendEntries)
+	defer close(n.appendEntriesCh)
 	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
+	defer n.ElectionTimer.Stop()
 	heartbeatTimer := time.NewTimer(heartbeatPeriod)
+	defer heartbeatTimer.Stop()
+
+	reportTick := time.NewTicker(time.Second)
+	defer reportTick.Stop()
+	go func() {
+		for range reportTick.C {
+			log.Printf("State => %s. Term => %d", n.State, n.CurrentTerm)
+		}
+	}()
 
 	for {
 		heartbeatCh := make(<-chan time.Time)
@@ -64,17 +77,15 @@ func (n *Node) Run() error {
 			heartbeatCh = heartbeatTimer.C
 		}
 		select {
-		case <-n.leaderIdCh:
+		case appendEntries := <-n.appendEntriesCh:
 			n.State = Follower
+			n.CurrentTerm = appendEntries.Term
 		case <-n.ElectionTimer.C:
 			n.State = Candidate
 		case <-heartbeatCh:
 		}
-		n.ElectionTimer.Reset(generateElectionTimeout())
-		log.Printf("State => %s", n.State)
 
 		if n.State == Leader {
-			time.Sleep(heartbeatPeriod)
 			ctx := context.Background()
 			wg := sync.WaitGroup{}
 			for i := range otherNodeIds {
@@ -82,10 +93,14 @@ func (n *Node) Run() error {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					log.Printf("issuing AppendEntries to node-%d", otherNodeIds[i])
+					if *flagVerbose {
+						log.Printf("issuing AppendEntries to node-%d", otherNodeIds[i])
+					}
 					result, err := n.issueAppendEntries(ctx, nodeHost)
 					if err != nil {
-						log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						if *flagVerbose {
+							log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						}
 					}
 					_ = result
 				}()
@@ -99,7 +114,7 @@ func (n *Node) Run() error {
 			requestVoteCtx, requestVoteCancel := context.WithCancel(context.Background())
 			go func() {
 				select {
-				case <-n.leaderIdCh:
+				case <-n.appendEntriesCh:
 					requestVoteCancel()
 				case <-requestVoteCtx.Done():
 				}
@@ -111,10 +126,14 @@ func (n *Node) Run() error {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					log.Printf("issuing RequestVote to node-%d", otherNodeIds[i])
+					if *flagVerbose {
+						log.Printf("issuing RequestVote to node-%d", otherNodeIds[i])
+					}
 					result, err := n.issueRequestVote(requestVoteCtx, nodeHost)
 					if err != nil {
-						log.Printf("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+						if *flagVerbose {
+							log.Printf("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+						}
 					} else {
 						votes <- result
 					}
@@ -143,6 +162,7 @@ func (n *Node) Run() error {
 				n.State = Leader
 			}
 		}
+		n.ElectionTimer.Reset(generateElectionTimeout())
 	}
 }
 
@@ -264,7 +284,7 @@ func (n *Node) appendEntriesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	response := AppendEntriesResult{Term: n.CurrentTerm}
 	if appendEntries.Term >= n.CurrentTerm {
-		n.leaderIdCh <- appendEntries.LeaderId
+		n.appendEntriesCh <- appendEntries
 		response.Success = true
 	}
 	responseBody, err := json.Marshal(&response)
