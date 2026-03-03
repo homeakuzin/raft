@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 type RequestVote struct {
 	Term         int
 	CandidateId  NodeId
@@ -37,7 +39,14 @@ type AppendEntriesResult struct {
 
 type NodeId int
 
-const EmptyId NodeId = 9999
+const EmptyId NodeId = -1
+
+func (id NodeId) String() string {
+	if id == EmptyId {
+		return "None"
+	}
+	return fmt.Sprintf("node-%d", id)
+}
 
 type State int
 

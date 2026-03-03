@@ -18,14 +18,14 @@ trap cleanup SIGINT SIGTERM
 
 # Build
 echo "Building hyperraft..."
-go build || { echo "Build failed!"; exit 1; }
+go build -race || { echo "Build failed!"; exit 1; }
 echo "Build successful!"
 
 # Start nodes
 echo "Starting hyperraft nodes..."
-./hyperraft 0 & PIDS+=($!)
-./hyperraft 1 & PIDS+=($!)
-./hyperraft 2 & PIDS+=($!)
+./hyperraft $@ 0 & PIDS+=($!)
+./hyperraft $@ 1 & PIDS+=($!)
+./hyperraft $@ 2 & PIDS+=($!)
 
 echo "Process PIDs: ${PIDS[@]}"
 echo "Press Ctrl+C to stop all nodes"
