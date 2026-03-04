@@ -173,7 +173,7 @@ func (n *Node) Run() {
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
-				log.Printf("term %d: election", term)
+				log.Printf("Term %d: election", term)
 				for i := range n.otherNodeIds {
 					nodeHost := n.nodes[n.otherNodeIds[i]]
 					go func() {
@@ -209,6 +209,11 @@ func (n *Node) Run() {
 						}
 					}()
 				}
+				if len(n.otherNodeIds) == 0 {
+					log.Printf("Leader now")
+					n.setState(Leader)
+					heartbeatTimer.Reset(heartbeatPeriod)
+				}
 			case response := <-requestVoteResponse:
 				n.dlog("RequestVoteResponse from someone: %+v", response)
 				n.ElectionTimer.Reset(generateElectionTimeout())
@@ -219,8 +224,8 @@ func (n *Node) Run() {
 				if response.VoteGranted {
 					// check vote sources?
 					votes := n.incrementVotesHave()
-					if votes > len(n.nodes)/2 || len(n.nodes) == votes {
-						n.dlog("Leader now")
+					if votes > len(n.nodes)/2 {
+						log.Printf("Leader now")
 						n.setState(Leader)
 						heartbeatTimer.Reset(heartbeatPeriod)
 					}

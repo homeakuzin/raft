@@ -80,6 +80,18 @@ func TestConsensys(t *testing.T) {
 	asserts.Equal(t, secondTerm, state.Term)
 }
 
+func TestSingleNode(t *testing.T) {
+	nodes := map[NodeId]string{
+		1: "localhost:5015",
+	}
+	node := NewNode(1, nodes)
+	go node.Run()
+	waitABit()
+	state := nodeState(t, "localhost:5015")
+	asserts.Equal(t, Leader, state.State)
+	node.Shutdown()
+}
+
 func waitABit() {
 	time.Sleep(time.Second)
 }
