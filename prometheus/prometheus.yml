@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'go-app-monitor'
+
+# Alertmanager configuration (if you want alerts)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093
+
+# Rule files (for alerts)
+rule_files:
+  # - "alerts.yml"
+
+scrape_configs:
+  # Scrape configuration for your Go app running on host
+  - job_name: 'go_app_host'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:2112'  # For macOS/Windows
+        # - '172.17.0.1:2112'  # Alternative for Linux (default Docker bridge IP)
+    metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    
+  # Self-monitoring: Prometheus metrics about itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
