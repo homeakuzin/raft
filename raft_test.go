@@ -15,6 +15,11 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5011",
 		3: "localhost:5012",
 	}
+	nodeClientAddrs := map[NodeId]string{
+		1: "localhost:5510",
+		2: "localhost:5511",
+		3: "localhost:5512",
+	}
 	n1 := NewNode(1, nodes) //.Verbose()
 	n2 := NewNode(2, nodes) //.Verbose()
 	n3 := NewNode(3, nodes) //.Verbose()
@@ -26,10 +31,13 @@ func TestConsensys(t *testing.T) {
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
+	go n1.RunClientServer(nodeClientAddrs[1])
+	go n2.RunClientServer(nodeClientAddrs[2])
+	go n3.RunClientServer(nodeClientAddrs[3])
 	waitABit()
-	n1State := nodeState(t, nodes[1])
-	n2State := nodeState(t, nodes[2])
-	n3State := nodeState(t, nodes[3])
+	n1State := nodeState(t, nodeClientAddrs[1])
+	n2State := nodeState(t, nodeClientAddrs[2])
+	n3State := nodeState(t, nodeClientAddrs[3])
 	roles := map[State][]NodeId{
 		Leader:    {},
 		Follower:  {},
@@ -55,7 +63,7 @@ func TestConsensys(t *testing.T) {
 	var newLeader *RaftState
 	var follower *RaftState
 	for _, id := range roles[Follower] {
-		state := nodeState(t, nodes[id])
+		state := nodeState(t, nodeClientAddrs[id])
 		if state.State == Leader {
 			newLeader = &state
 		} else if state.State == Follower {
@@ -74,8 +82,9 @@ func TestConsensys(t *testing.T) {
 	t.Logf("leader returns: %s", firstEverLeader)
 	leaderIsBack := nodeStructs[firstEverLeader]
 	go leaderIsBack.Run()
+	go leaderIsBack.RunClientServer(nodeClientAddrs[firstEverLeader])
 	waitABit()
-	state := nodeState(t, nodes[firstEverLeader])
+	state := nodeState(t, nodeClientAddrs[firstEverLeader])
 	asserts.Equal(t, Follower, state.State)
 	asserts.Equal(t, secondTerm, state.Term)
 }
@@ -86,10 +95,38 @@ func TestSingleNode(t *testing.T) {
 	}
 	node := NewNode(1, nodes)
 	go node.Run()
+	go node.RunClientServer("localhost:5016")
 	waitABit()
-	state := nodeState(t, "localhost:5015")
+	state := nodeState(t, "localhost:5016")
 	asserts.Equal(t, Leader, state.State)
 	node.Shutdown()
+}
+
+// func TestLogReplication(t *testing.T) {
+// 	nodes := map[NodeId]string{
+// 		1: "localhost:6010",
+// 		2: "localhost:6011",
+// 		3: "localhost:6012",
+// 	}
+// 	n1 := NewNode(1, nodes)
+// 	n2 := NewNode(2, nodes)
+// 	n3 := NewNode(3, nodes)
+// 	go n1.Run()
+// 	go n2.Run()
+// 	go n3.Run()
+// 	waitABit()
+// 	var leaderId NodeId
+// 	for id := range nodes {
+// nodeClientAddrs 		state := nodeState(t, nodes[id])
+// 		if state.State == Leader {
+// 			leaderId = id
+// 		}
+// 	}
+
+// }
+
+func setKey(t *testing.T, id NodeId, key string, value []byte) error {
+	return nil
 }
 
 func waitABit() {
@@ -106,6 +143,7 @@ func nodeState(t *testing.T, addr string) RaftState {
 		t.Fatalf("read body: %s", err.Error())
 	}
 	resp.Body.Close()
+	asserts.Equal(t, 200, resp.StatusCode)
 	var state RaftState
 	if err := json.Unmarshal(bodyjson, &state); err != nil {
 		t.Fatalf("unmarshal /raft: %s", err.Error())

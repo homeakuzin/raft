@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,20 +31,22 @@ func generateElectionTimeout() time.Duration {
 }
 
 type Node struct {
-	mu            sync.Mutex
-	Id            NodeId
-	VotedFor      NodeId
-	VotesHave     int
-	CurrentTerm   int
-	State         State
-	ElectionTimer *time.Timer
-	shutdown      chan struct{}
-	nodes         map[NodeId]string
-	otherNodeIds  []NodeId
-	StateMachine  *StateMachine
-	httpServer    *http.Server
-	reportTick    *time.Ticker
-	verbose       bool
+	mu               sync.Mutex
+	Id               NodeId
+	VotedFor         NodeId
+	VotesHave        int
+	CurrentTerm      int
+	State            State
+	ElectionTimer    *time.Timer
+	shutdown         chan struct{}
+	nodes            map[NodeId]string
+	otherNodeIds     []NodeId
+	StateMachine     *StateMachine
+	httpServer       *http.Server
+	clientServer     *http.Server
+	reportTick       *time.Ticker
+	verbose          bool
+	clientServerAddr string
 }
 
 func (n *Node) Verbose() *Node {
@@ -64,7 +67,12 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 			otherNodeIds = append(otherNodeIds, otherId)
 		}
 	}
-	return &Node{Id: id, nodes: nodes, StateMachine: NewStateMachine(), shutdown: make(chan struct{}), otherNodeIds: otherNodeIds}
+	return &Node{Id: id,
+		nodes:        nodes,
+		StateMachine: NewStateMachine(),
+		shutdown:     make(chan struct{}),
+		otherNodeIds: otherNodeIds,
+	}
 }
 
 func (n *Node) incrementTerm() int {
@@ -128,6 +136,9 @@ func (n *Node) Shutdown() {
 	if err := n.httpServer.Shutdown(context.Background()); err != nil {
 		log.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
+	if err := n.clientServer.Shutdown(context.Background()); err != nil {
+		log.Printf("could not shutdown client HTTP server: %s", err.Error())
+	}
 	if n.reportTick != nil {
 		n.reportTick.Stop()
 	}
@@ -143,8 +154,11 @@ func (n *Node) StartReporting() {
 }
 
 func (n *Node) Run() {
-	go n.runServer()
-
+	go func() {
+		if err := n.runServer(); err != nil {
+			n.Shutdown()
+		}
+	}()
 	n.VotedFor = EmptyId
 	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
 	defer n.ElectionTimer.Stop()
@@ -409,36 +423,18 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type RaftState struct {
-	State State
-	Term  int
-}
-
-func (n *Node) handlerRaftState(w http.ResponseWriter, r *http.Request) {
-	state := RaftState{n.getState(), n.getCurrentTerm()}
-	stateBytes, err := json.Marshal(&state)
-	if err != nil {
-		log.Printf("Could not marshal RaftState: %s", err.Error())
-		w.WriteHeader(500)
-	}
-	w.Header().Add("Content-Type", "application/json")
-	w.Write(stateBytes)
-}
-
-func (n *Node) runServer() {
-	log.SetOutput(os.Stdout)
+func (n *Node) runServer() error {
 	handler := http.NewServeMux()
-	// handler.HandleFunc("POST /{key}", n.handlerRequestVote)
-	// handler.HandleFunc("DELETE /{key}", n.handlerRequestVote)
-	handler.HandleFunc("GET /raft", n.handlerRaftState)
 	handler.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
 	handler.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
 	host := n.nodes[n.Id]
 	log.Printf("Running HTTP server at %v", host)
 	n.httpServer = &http.Server{Addr: host, Handler: handler}
-	if err := n.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("http server error: %s", err.Error())
+	err := n.httpServer.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
 	}
+	return nil
 }
 
 func (n *Node) dlog(format string, v ...any) {
@@ -448,8 +444,10 @@ func (n *Node) dlog(format string, v ...any) {
 }
 
 func main() {
+	log.SetOutput(os.Stdout)
 	flagNodes := flag.String("nodes", "", "id:host:port joined by semicolon. Example:\n\t0:0.0.0.1:1234;1:0.0.0.2:2345;2:0.0.0.3:3456")
 	flagNodeId := flag.Int("id", int(EmptyId), "Current node ID")
+	flagClientAddr := flag.String("clientaddr", "", "Address to serve HTTP clients")
 	flag.Parse()
 
 	nodes := make(map[NodeId]string)
@@ -479,5 +477,12 @@ func main() {
 		node.Verbose()
 	}
 	node.StartReporting()
+	if *flagClientAddr != "" {
+		go func() {
+			if err := node.RunClientServer(*flagClientAddr); err != nil {
+				log.Printf("Could not run client HTTP server: %s", err.Error())
+			}
+		}()
+	}
 	node.Run()
 }
