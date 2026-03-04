@@ -35,6 +35,9 @@ func TestConsensys(t *testing.T) {
 	go n1.RunClientServer(nodeClientAddrs[1])
 	go n2.RunClientServer(nodeClientAddrs[2])
 	go n3.RunClientServer(nodeClientAddrs[3])
+	defer n1.Shutdown()
+	defer n2.Shutdown()
+	defer n3.Shutdown()
 	waitABit()
 	n1State := nodeState(t, nodeClientAddrs[1])
 	n2State := nodeState(t, nodeClientAddrs[2])
@@ -144,6 +147,7 @@ func sendSetRequest(t *testing.T, addr string, key string, value []byte) {
 	asserts.Equal(t, 200, resp.StatusCode)
 }
 
+// TODO listen to some kind of event maybe?
 func waitABit() {
 	time.Sleep(time.Second)
 }

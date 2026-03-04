@@ -202,11 +202,8 @@ func (n *Node) eventLoop() {
 			n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
 			response := AppendEntriesResult{}
 			if appendEntries.data.Term >= n.getCurrentTerm() {
-				n.ElectionTimer.Reset(generateElectionTimeout())
+				n.becomeFollower()
 				n.setCurrentTerm(appendEntries.data.Term)
-				if n.setState(Follower) == Leader {
-					n.heartbeatTimer.Stop()
-				}
 				response.Success = true
 			}
 			response.Term = n.getCurrentTerm()
@@ -216,9 +213,7 @@ func (n *Node) eventLoop() {
 			response := RequestVoteResult{}
 			if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
 				n.dlog("vote for %s", requestVote.data.CandidateId)
-				if n.setState(Follower) == Leader {
-					n.heartbeatTimer.Stop()
-				}
+				n.becomeFollower()
 				n.setCurrentTerm(requestVote.data.Term)
 				n.setVotedFor(requestVote.data.CandidateId)
 				response.VoteGranted = true
@@ -226,11 +221,7 @@ func (n *Node) eventLoop() {
 			response.Term = n.getCurrentTerm()
 			requestVote.result <- response
 		case <-n.ElectionTimer.C:
-			n.setState(Candidate)
-			term := n.incrementTerm()
-			n.setVotedFor(n.Id)
-			n.setVotesHave(1)
-			log.Printf("Term %d: election", term)
+			n.becomeCandidate()
 			for i := range n.otherNodeIds {
 				nodeHost := n.nodes[n.otherNodeIds[i]]
 				go func() {
@@ -245,10 +236,7 @@ func (n *Node) eventLoop() {
 				}()
 			}
 			if len(n.otherNodeIds) == 0 {
-				log.Printf("Leader now")
-				n.setState(Leader)
-				n.ElectionTimer.Stop()
-				n.heartbeatTimer.Reset(heartbeatPeriod)
+				n.becomeLeader()
 			}
 		case response := <-requestVoteResponse:
 			if state := n.getState(); state != Candidate {
@@ -256,19 +244,14 @@ func (n *Node) eventLoop() {
 				break
 			}
 			if response.Term > n.getCurrentTerm() {
-				n.setState(Follower)
-				n.ElectionTimer.Reset(generateElectionTimeout())
-				n.heartbeatTimer.Stop()
+				n.becomeFollower()
 				break
 			}
 			if response.VoteGranted {
 				// TODO: check vote source
 				votes := n.incrementVotesHave()
 				if votes*2 > len(n.nodes) {
-					log.Printf("Leader now")
-					n.setState(Leader)
-					n.ElectionTimer.Stop()
-					n.heartbeatTimer.Reset(heartbeatPeriod)
+					n.becomeLeader()
 				}
 			}
 
@@ -278,7 +261,7 @@ func (n *Node) eventLoop() {
 				break
 			}
 			if response.Term > n.getCurrentTerm() {
-				n.setState(Follower)
+				n.becomeFollower()
 			}
 		case <-n.heartbeatTimer.C:
 			if state := n.getState(); state != Leader {
@@ -316,6 +299,27 @@ func (n *Node) eventLoop() {
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
+}
+
+func (n *Node) becomeCandidate() {
+	n.setState(Candidate)
+	term := n.incrementTerm()
+	n.setVotedFor(n.Id)
+	n.setVotesHave(1)
+	log.Printf("Term %d: election", term)
+}
+
+func (n *Node) becomeFollower() {
+	n.setState(Follower)
+	n.ElectionTimer.Reset(generateElectionTimeout())
+	n.heartbeatTimer.Stop()
+}
+
+func (n *Node) becomeLeader() {
+	log.Printf("Leader now")
+	n.setState(Leader)
+	n.ElectionTimer.Stop()
+	n.heartbeatTimer.Reset(heartbeatPeriod)
 }
 
 func (n *Node) report() {
