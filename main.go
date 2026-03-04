@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,12 +28,6 @@ func generateElectionTimeout() time.Duration {
 	return electionTimeout + delta
 }
 
-var nodes = map[NodeId]string{
-	0: "localhost:4000",
-	1: "localhost:4001",
-	2: "localhost:4002",
-}
-
 type Node struct {
 	mu            sync.Mutex
 	Id            NodeId
@@ -41,8 +36,10 @@ type Node struct {
 	CurrentTerm   int
 	State         State
 	ElectionTimer *time.Timer
-	OtherNodeIds  []NodeId
-	StateMachine  *StateMachine
+
+	nodes        map[NodeId]string
+	otherNodeIds []NodeId
+	StateMachine *StateMachine
 }
 
 func (n *Node) getCurrentTerm() int {
@@ -108,10 +105,10 @@ func (n *Node) getVotesHave() int {
 }
 
 func (n *Node) Run() error {
-	host := nodes[n.Id]
-	for id := range nodes {
+	host := n.nodes[n.Id]
+	for id := range n.nodes {
 		if n.Id != id {
-			n.OtherNodeIds = append(n.OtherNodeIds, id)
+			n.otherNodeIds = append(n.otherNodeIds, id)
 		}
 	}
 	log.Printf("spinning a node at %v", host)
@@ -147,15 +144,15 @@ func (n *Node) Run() error {
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
 				log.Printf("term %d: election", term)
-				for i := range n.OtherNodeIds {
-					nodeHost := nodes[n.OtherNodeIds[i]]
+				for i := range n.otherNodeIds {
+					nodeHost := n.nodes[n.otherNodeIds[i]]
 					go func() {
-						dlog("issuing RequestVote to %s", n.OtherNodeIds[i])
+						dlog("issuing RequestVote to %s", n.otherNodeIds[i])
 						result, err := n.issueRequestVote(context.Background(), nodeHost)
 						if err != nil {
 							dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("RequestVoteResponse from %s: %+v", n.OtherNodeIds[i], result)
+							dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
 							requestVoteResponse <- result
 						}
 					}()
@@ -169,15 +166,15 @@ func (n *Node) Run() error {
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
 				dlog("term %d: election", term)
-				for i := range n.OtherNodeIds {
-					nodeHost := nodes[n.OtherNodeIds[i]]
+				for i := range n.otherNodeIds {
+					nodeHost := n.nodes[n.otherNodeIds[i]]
 					go func() {
-						dlog("issuing RequestVote to %s", n.OtherNodeIds[i])
+						dlog("issuing RequestVote to %s", n.otherNodeIds[i])
 						result, err := n.issueRequestVote(context.Background(), nodeHost)
 						if err != nil {
 							dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("RequestVoteResponse from %s: %+v", n.OtherNodeIds[i], result)
+							dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
 							requestVoteResponse <- result
 						}
 					}()
@@ -192,7 +189,7 @@ func (n *Node) Run() error {
 				if response.VoteGranted {
 					// check vote sources?
 					votes := n.incrementVotesHave()
-					if votes > len(nodes)/2 {
+					if votes > len(n.nodes)/2 || len(n.nodes) == votes {
 						dlog("Leader now")
 						n.setState(Leader)
 					}
@@ -203,17 +200,17 @@ func (n *Node) Run() error {
 			case <-heartbeatTimer.C:
 				appendEntriesCtx := context.Background()
 				wg := &sync.WaitGroup{}
-				for i := range n.OtherNodeIds {
-					nodeHost := nodes[n.OtherNodeIds[i]]
+				for i := range n.otherNodeIds {
+					nodeHost := n.nodes[n.otherNodeIds[i]]
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						dlog("issuing AppendEntries to %s", n.OtherNodeIds[i])
+						dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
 						result, err := n.issueAppendEntries(appendEntriesCtx, nodeHost)
 						if err != nil {
 							dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("AppendEntriesResponse from %s: %+v", n.OtherNodeIds[i], result)
+							dlog("AppendEntriesResponse from %s: %+v", n.otherNodeIds[i], result)
 							appendEntriesResponse <- result
 						}
 					}()
@@ -394,20 +391,33 @@ func dlog(format string, v ...any) {
 }
 
 func main() {
+	flagNodes := flag.String("nodes", "", "id:host:port joined by semicolon. Example:\n\t0:0.0.0.1:1234;1:0.0.0.2:2345;2:0.0.0.3:3456")
+	flagNodeId := flag.Int("id", int(EmptyId), "Current node ID")
 	flag.Parse()
-	idstr := flag.Arg(0)
-	if idstr == "" {
-		log.Fatal("Provide node ID")
-	}
-	nodeIdInt, err := strconv.Atoi(idstr)
-	if _, ok := nodes[NodeId(nodeIdInt)]; err != nil || !ok {
-		log.Fatal("Incorrect ID provided")
+
+	nodes := make(map[NodeId]string)
+	nodeParts := strings.Split(*flagNodes, ";")
+	for i := range nodeParts {
+		idHostAndPort := strings.Split(nodeParts[i], ":")
+		if len(idHostAndPort) != 3 {
+			flag.Usage()
+			log.Fatal("Incorrect -nodes usage")
+		}
+		nodeIdInt, err := strconv.Atoi(idHostAndPort[0])
+		if err != nil {
+			log.Fatal("Incorrect -nodes usage")
+		}
+		nodes[NodeId(nodeIdInt)] = idHostAndPort[1] + ":" + idHostAndPort[2]
 	}
 
-	nodeId := NodeId(nodeIdInt)
+	nodeId := NodeId(*flagNodeId)
+	if _, ok := nodes[NodeId(*flagNodeId)]; !ok {
+		log.Fatalf("No node with id %d", *flagNodeId)
+	}
+
 	log.SetPrefix(fmt.Sprintf("[%s] ", nodeId))
 	log.SetFlags(log.Lmicroseconds)
-	node := Node{Id: nodeId, StateMachine: NewStateMachine()}
+	node := Node{Id: nodeId, StateMachine: NewStateMachine(), nodes: nodes}
 	if err := node.Run(); err != nil {
 		log.Fatal(err.Error())
 	}
