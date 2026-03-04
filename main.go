@@ -17,13 +17,13 @@ import (
 )
 
 var heartbeatPeriod = 50 * time.Millisecond
-var electionTimeout = 1500 * time.Millisecond
-var electionTimeoutDelta = 550 * time.Millisecond
+var electionTimeout = 150 * time.Millisecond
+var electionTimeoutDelta = 150 * time.Millisecond
 
 var flagVerbose = flag.Bool("v", false, "enables verbose output")
 
 func generateElectionTimeout() time.Duration {
-	delta := time.Duration(rand.Int63n(int64(electionTimeoutDelta)*2) - int64(electionTimeoutDelta))
+	delta := time.Duration(rand.Int63n(int64(electionTimeoutDelta) * 2))
 	return electionTimeout + delta
 }
 
@@ -42,6 +42,7 @@ type Node struct {
 	State         State
 	ElectionTimer *time.Timer
 	OtherNodeIds  []NodeId
+	StateMachine  *StateMachine
 }
 
 func (n *Node) getCurrentTerm() int {
@@ -145,7 +146,7 @@ func (n *Node) Run() error {
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
-				dlog("term %d: election", term)
+				log.Printf("term %d: election", term)
 				for i := range n.OtherNodeIds {
 					nodeHost := nodes[n.OtherNodeIds[i]]
 					go func() {
@@ -201,9 +202,12 @@ func (n *Node) Run() error {
 			select {
 			case <-heartbeatTimer.C:
 				appendEntriesCtx := context.Background()
+				wg := &sync.WaitGroup{}
 				for i := range n.OtherNodeIds {
 					nodeHost := nodes[n.OtherNodeIds[i]]
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
 						dlog("issuing AppendEntries to %s", n.OtherNodeIds[i])
 						result, err := n.issueAppendEntries(appendEntriesCtx, nodeHost)
 						if err != nil {
@@ -214,13 +218,13 @@ func (n *Node) Run() error {
 						}
 					}()
 				}
+				heartbeatTimer.Reset(heartbeatPeriod)
 			case response := <-appendEntriesResponse:
 				if response.Term > n.getCurrentTerm() {
 					n.ElectionTimer.Reset(generateElectionTimeout())
 					n.setState(Follower)
 					break
 				}
-				heartbeatTimer.Reset(heartbeatPeriod)
 			}
 		}
 	}
@@ -242,7 +246,7 @@ func (n *Node) issueRequestVote(ctx context.Context, host string) (result Reques
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/request-vote", host), bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/request-vote", host), bytes.NewBuffer(body))
 	if err != nil {
 		return
 	}
@@ -277,7 +281,7 @@ func (n *Node) issueAppendEntries(ctx context.Context, host string) (AppendEntri
 		return result, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/append-entries", host), bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/append-entries", host), bytes.NewBuffer(body))
 	if err != nil {
 		return result, err
 	}
@@ -374,8 +378,10 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 
 func (n *Node) runServer(host string) {
 	log.SetOutput(os.Stdout)
-	http.HandleFunc("POST /request-vote", n.handlerRequestVote)
-	http.HandleFunc("POST /append-entries", n.handlerAppendEntries)
+	// http.HandleFunc("POST /{key}", n.handlerRequestVote)
+	// http.HandleFunc("DELETE /{key}", n.handlerRequestVote)
+	http.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
+	http.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
 	if err := http.ListenAndServe(host, nil); err != nil {
 		log.Fatal(err.Error())
 	}
@@ -401,7 +407,7 @@ func main() {
 	nodeId := NodeId(nodeIdInt)
 	log.SetPrefix(fmt.Sprintf("[%s] ", nodeId))
 	log.SetFlags(log.Lmicroseconds)
-	node := Node{Id: nodeId}
+	node := Node{Id: nodeId, StateMachine: NewStateMachine()}
 	if err := node.Run(); err != nil {
 		log.Fatal(err.Error())
 	}
