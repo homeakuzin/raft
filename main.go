@@ -31,22 +31,25 @@ func generateElectionTimeout() time.Duration {
 }
 
 type Node struct {
-	mu               sync.Mutex
-	Id               NodeId
-	VotedFor         NodeId
-	VotesHave        int
-	CurrentTerm      int
-	State            State
-	ElectionTimer    *time.Timer
-	shutdown         chan struct{}
-	nodes            map[NodeId]string
-	otherNodeIds     []NodeId
-	StateMachine     *StateMachine
-	httpServer       *http.Server
-	clientServer     *http.Server
-	reportTick       *time.Ticker
-	verbose          bool
-	clientServerAddr string
+	mu                   sync.Mutex
+	Id                   NodeId
+	VotedFor             NodeId
+	VotesHave            int
+	CurrentTerm          int
+	State                State
+	ElectionTimer        *time.Timer
+	heartbeatTimer       *time.Timer
+	shutdown             chan struct{}
+	nodes                map[NodeId]string
+	otherNodeIds         []NodeId
+	StateMachine         *StateMachine
+	httpServer           *http.Server
+	clientServer         *http.Server
+	reportTick           *time.Ticker
+	verbose              bool
+	clientServerAddr     string
+	stateUpdateRequestCh chan updateRequest
+	requestVoteRpc       chan requestVoteRpcCall
 }
 
 func (n *Node) Verbose() *Node {
@@ -68,10 +71,12 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 		}
 	}
 	return &Node{Id: id,
-		nodes:        nodes,
-		StateMachine: NewStateMachine(),
-		shutdown:     make(chan struct{}),
-		otherNodeIds: otherNodeIds,
+		nodes:                nodes,
+		StateMachine:         NewStateMachine(),
+		stateUpdateRequestCh: make(chan updateRequest),
+		shutdown:             make(chan struct{}),
+		otherNodeIds:         otherNodeIds,
+		requestVoteRpc:       make(chan requestVoteRpcCall),
 	}
 }
 
@@ -163,9 +168,9 @@ func (n *Node) Run() {
 	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
 	defer n.ElectionTimer.Stop()
 
-	heartbeatTimer := time.NewTimer(heartbeatPeriod)
-	heartbeatTimer.Stop()
-	defer heartbeatTimer.Stop()
+	n.heartbeatTimer = time.NewTimer(heartbeatPeriod)
+	n.heartbeatTimer.Stop()
+	defer n.heartbeatTimer.Stop()
 
 	requestVoteResponse := make(chan RequestVoteResult)
 	appendEntriesResponse := make(chan AppendEntriesResult)
@@ -181,8 +186,8 @@ func (n *Node) Run() {
 		state := n.getState()
 		if state == Follower {
 			select {
+			// case <-
 			case <-n.ElectionTimer.C:
-				n.ElectionTimer.Reset(generateElectionTimeout())
 				n.setState(Candidate)
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
@@ -202,10 +207,10 @@ func (n *Node) Run() {
 					}()
 				}
 			}
+			n.ElectionTimer.Reset(generateElectionTimeout())
 		} else if state == Candidate {
 			select {
 			case <-n.ElectionTimer.C:
-				n.ElectionTimer.Reset(generateElectionTimeout())
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
@@ -226,11 +231,10 @@ func (n *Node) Run() {
 				if len(n.otherNodeIds) == 0 {
 					log.Printf("Leader now")
 					n.setState(Leader)
-					heartbeatTimer.Reset(heartbeatPeriod)
+					n.heartbeatTimer.Reset(heartbeatPeriod)
 				}
 			case response := <-requestVoteResponse:
 				n.dlog("RequestVoteResponse from someone: %+v", response)
-				n.ElectionTimer.Reset(generateElectionTimeout())
 				if response.Term > n.getCurrentTerm() {
 					n.setState(Follower)
 					break
@@ -241,22 +245,26 @@ func (n *Node) Run() {
 					if votes > len(n.nodes)/2 {
 						log.Printf("Leader now")
 						n.setState(Leader)
-						heartbeatTimer.Reset(heartbeatPeriod)
+						n.heartbeatTimer.Reset(heartbeatPeriod)
 					}
 				}
 			}
+			n.ElectionTimer.Reset(generateElectionTimeout())
 		} else if state == Leader {
 			select {
-			case <-heartbeatTimer.C:
+			case req := <-n.stateUpdateRequestCh:
+				log.Printf("Incoming request: %s", req.cmd)
+				req.response <- 200
+			case <-n.heartbeatTimer.C:
 				appendEntriesCtx := context.Background()
-				wg := &sync.WaitGroup{}
 				for i := range n.otherNodeIds {
 					nodeHost := n.nodes[n.otherNodeIds[i]]
-					wg.Add(1)
 					go func() {
-						defer wg.Done()
 						n.dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
-						result, err := n.issueAppendEntries(appendEntriesCtx, nodeHost)
+						result, err := n.issueAppendEntries(appendEntriesCtx, AppendEntries{
+							Term:     n.getCurrentTerm(),
+							LeaderId: n.Id,
+						}, nodeHost)
 						if err != nil {
 							n.dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 						} else {
@@ -265,14 +273,13 @@ func (n *Node) Run() {
 						}
 					}()
 				}
-				heartbeatTimer.Reset(heartbeatPeriod)
 			case response := <-appendEntriesResponse:
 				if response.Term > n.getCurrentTerm() {
-					n.ElectionTimer.Reset(generateElectionTimeout())
 					n.setState(Follower)
 					break
 				}
 			}
+			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
 }
@@ -317,12 +324,8 @@ func (n *Node) issueRequestVote(ctx context.Context, host string) (result Reques
 	return
 }
 
-func (n *Node) issueAppendEntries(ctx context.Context, host string) (AppendEntriesResult, error) {
+func (n *Node) issueAppendEntries(ctx context.Context, appendEntries AppendEntries, host string) (AppendEntriesResult, error) {
 	var result AppendEntriesResult
-	appendEntries := AppendEntries{
-		Term:     n.getCurrentTerm(),
-		LeaderId: n.Id,
-	}
 	body, err := json.Marshal(&appendEntries)
 	if err != nil {
 		return result, err
@@ -348,6 +351,11 @@ func (n *Node) issueAppendEntries(ctx context.Context, host string) (AppendEntri
 	}
 	err = json.Unmarshal(resultBytes, &result)
 	return result, err
+}
+
+type requestVoteRpcCall struct {
+	data     RequestVote
+	response chan RequestVoteResult
 }
 
 func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {

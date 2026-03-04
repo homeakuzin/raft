@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type Action int
 
@@ -13,6 +16,14 @@ type Command struct {
 	Action Action
 	Key    string
 	Value  []byte
+}
+
+func (c Command) String() string {
+	if c.Action == ActionSet {
+		return fmt.Sprintf("SET %s = (%d bytes)", c.Key, len(c.Value))
+	} else {
+		return fmt.Sprintf("DELETE %s", c.Key)
+	}
 }
 
 type StateMachine struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"hyperraft/pkg/asserts"
 	"io"
@@ -108,25 +109,39 @@ func TestSingleNode(t *testing.T) {
 // 		2: "localhost:6011",
 // 		3: "localhost:6012",
 // 	}
+// 	nodeClientAddrs := map[NodeId]string{
+// 		1: "localhost:6510",
+// 		2: "localhost:6511",
+// 		3: "localhost:6512",
+// 	}
 // 	n1 := NewNode(1, nodes)
 // 	n2 := NewNode(2, nodes)
 // 	n3 := NewNode(3, nodes)
 // 	go n1.Run()
 // 	go n2.Run()
 // 	go n3.Run()
+// 	go n1.RunClientServer(nodeClientAddrs[1])
+// 	go n2.RunClientServer(nodeClientAddrs[2])
+// 	go n3.RunClientServer(nodeClientAddrs[3])
 // 	waitABit()
 // 	var leaderId NodeId
 // 	for id := range nodes {
-// nodeClientAddrs 		state := nodeState(t, nodes[id])
+// 		state := nodeState(t, nodeClientAddrs[id])
 // 		if state.State == Leader {
 // 			leaderId = id
+// 			break
 // 		}
 // 	}
-
+// 	sendSetRequest(t, nodeClientAddrs[leaderId], "x", []byte("1"))
 // }
 
-func setKey(t *testing.T, id NodeId, key string, value []byte) error {
-	return nil
+func sendSetRequest(t *testing.T, addr string, key string, value []byte) {
+	resp, err := http.Post("http://"+addr+"/"+key, "text/plain", bytes.NewBuffer(value))
+	if err != nil {
+		t.Fatalf("sendSetRequest: %s", err.Error())
+	}
+	resp.Body.Close()
+	asserts.Equal(t, 200, resp.StatusCode)
 }
 
 func waitABit() {
