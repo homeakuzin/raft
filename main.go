@@ -30,6 +30,16 @@ func generateElectionTimeout() time.Duration {
 	return electionTimeout + delta
 }
 
+type requestVoteRpcCall struct {
+	data   RequestVote
+	result chan RequestVoteResult
+}
+
+type appendEntriesRpcCall struct {
+	data   AppendEntries
+	result chan AppendEntriesResult
+}
+
 type Node struct {
 	mu                   sync.Mutex
 	Id                   NodeId
@@ -50,6 +60,7 @@ type Node struct {
 	clientServerAddr     string
 	stateUpdateRequestCh chan updateRequest
 	requestVoteRpc       chan requestVoteRpcCall
+	appendEntriesRpc     chan appendEntriesRpcCall
 }
 
 func (n *Node) Verbose() *Node {
@@ -77,6 +88,7 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 		shutdown:             make(chan struct{}),
 		otherNodeIds:         otherNodeIds,
 		requestVoteRpc:       make(chan requestVoteRpcCall),
+		appendEntriesRpc:     make(chan appendEntriesRpcCall),
 	}
 }
 
@@ -99,10 +111,12 @@ func (n *Node) getState() State {
 	return n.State
 }
 
-func (n *Node) setState(s State) {
+func (n *Node) setState(s State) State {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	was := n.State
 	n.State = s
+	return was
 }
 
 func (n *Node) getVotedFor() NodeId {
@@ -166,15 +180,15 @@ func (n *Node) Run() {
 	}()
 	n.VotedFor = EmptyId
 	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
-	defer n.ElectionTimer.Stop()
 
 	n.heartbeatTimer = time.NewTimer(heartbeatPeriod)
 	n.heartbeatTimer.Stop()
-	defer n.heartbeatTimer.Stop()
+	n.eventLoop()
+}
 
+func (n *Node) eventLoop() {
 	requestVoteResponse := make(chan RequestVoteResult)
 	appendEntriesResponse := make(chan AppendEntriesResult)
-
 	run := atomic.Bool{}
 	run.Store(true)
 	go func() {
@@ -183,10 +197,83 @@ func (n *Node) Run() {
 	}()
 
 	for run.Load() {
+		// select {
+		// case appendEntries := <-n.appendEntriesRpc:
+		// 	n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
+		// 	response := AppendEntriesResult{}
+		// 	if appendEntries.data.Term >= n.getCurrentTerm() {
+		// 		n.ElectionTimer.Reset(generateElectionTimeout())
+		// 		n.setCurrentTerm(appendEntries.data.Term)
+		// 		if n.setState(Follower) == Leader {
+		// 			n.heartbeatTimer.Stop()
+		// 		}
+		// 		response.Success = true
+		// 	}
+		// 	response.Term = n.getCurrentTerm()
+		// 	appendEntries.result <- response
+		// case requestVote := <-n.requestVoteRpc:
+		// 	n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
+		// 	response := RequestVoteResult{}
+		// 	if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+		// 		n.dlog("vote for %s", requestVote.data.CandidateId)
+		// 		if n.setState(Follower) == Leader {
+		// 			n.heartbeatTimer.Stop()
+		// 		}
+		// 		n.setCurrentTerm(requestVote.data.Term)
+		// 		n.setVotedFor(requestVote.data.CandidateId)
+		// 		response.VoteGranted = true
+		// 	}
+		// 	response.Term = n.getCurrentTerm()
+		// 	requestVote.result <- response
+		// case <-n.ElectionTimer.C:
+		// 	n.setState(Candidate)
+		// 	term := n.incrementTerm()
+		// 	n.setVotedFor(n.Id)
+		// 	n.setVotesHave(1)
+		// 	log.Printf("Term %d: election", term)
+		// 	for i := range n.otherNodeIds {
+		// 		nodeHost := n.nodes[n.otherNodeIds[i]]
+		// 		go func() {
+		// 			n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
+		// 			result, err := n.issueRequestVote(context.Background(), nodeHost)
+		// 			if err != nil {
+		// 				n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+		// 			} else {
+		// 				n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
+		// 				requestVoteResponse <- result
+		// 			}
+		// 		}()
+		// 	}
+		// }
+
 		state := n.getState()
 		if state == Follower {
 			select {
-			// case <-
+			case appendEntries := <-n.appendEntriesRpc:
+				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
+				response := AppendEntriesResult{}
+				if appendEntries.data.Term >= n.getCurrentTerm() {
+					n.ElectionTimer.Reset(generateElectionTimeout())
+					n.setCurrentTerm(appendEntries.data.Term)
+					if n.setState(Follower) == Leader {
+						n.heartbeatTimer.Stop()
+					}
+					response.Success = true
+				}
+				response.Term = n.getCurrentTerm()
+				appendEntries.result <- response
+			case requestVote := <-n.requestVoteRpc:
+				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
+				response := RequestVoteResult{}
+				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+					n.dlog("vote for %s", requestVote.data.CandidateId)
+					n.setState(Follower)
+					n.setCurrentTerm(requestVote.data.Term)
+					n.setVotedFor(requestVote.data.CandidateId)
+					response.VoteGranted = true
+				}
+				response.Term = n.getCurrentTerm()
+				requestVote.result <- response
 			case <-n.ElectionTimer.C:
 				n.setState(Candidate)
 				term := n.incrementTerm()
@@ -210,6 +297,31 @@ func (n *Node) Run() {
 			n.ElectionTimer.Reset(generateElectionTimeout())
 		} else if state == Candidate {
 			select {
+			case appendEntries := <-n.appendEntriesRpc:
+				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
+				response := AppendEntriesResult{}
+				if appendEntries.data.Term >= n.getCurrentTerm() {
+					n.ElectionTimer.Reset(generateElectionTimeout())
+					n.setCurrentTerm(appendEntries.data.Term)
+					if n.setState(Follower) == Leader {
+						n.heartbeatTimer.Stop()
+					}
+					response.Success = true
+				}
+				response.Term = n.getCurrentTerm()
+				appendEntries.result <- response
+			case requestVote := <-n.requestVoteRpc:
+				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
+				response := RequestVoteResult{}
+				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+					n.dlog("vote for %s", requestVote.data.CandidateId)
+					n.setState(Follower)
+					n.setCurrentTerm(requestVote.data.Term)
+					n.setVotedFor(requestVote.data.CandidateId)
+					response.VoteGranted = true
+				}
+				response.Term = n.getCurrentTerm()
+				requestVote.result <- response
 			case <-n.ElectionTimer.C:
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
@@ -240,7 +352,7 @@ func (n *Node) Run() {
 					break
 				}
 				if response.VoteGranted {
-					// check vote sources?
+					// TODO: check vote source
 					votes := n.incrementVotesHave()
 					if votes > len(n.nodes)/2 {
 						log.Printf("Leader now")
@@ -252,6 +364,32 @@ func (n *Node) Run() {
 			n.ElectionTimer.Reset(generateElectionTimeout())
 		} else if state == Leader {
 			select {
+			case appendEntries := <-n.appendEntriesRpc:
+				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
+				response := AppendEntriesResult{}
+				if appendEntries.data.Term >= n.getCurrentTerm() {
+					n.ElectionTimer.Reset(generateElectionTimeout())
+					n.setCurrentTerm(appendEntries.data.Term)
+					if n.setState(Follower) == Leader {
+						n.heartbeatTimer.Stop()
+					}
+					response.Success = true
+				}
+				response.Term = n.getCurrentTerm()
+				appendEntries.result <- response
+			case requestVote := <-n.requestVoteRpc:
+				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
+				response := RequestVoteResult{}
+				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+					n.dlog("vote for %s", requestVote.data.CandidateId)
+					n.setState(Follower)
+					n.setCurrentTerm(requestVote.data.Term)
+					n.setVotedFor(requestVote.data.CandidateId)
+					response.VoteGranted = true
+					n.heartbeatTimer.Stop()
+				}
+				response.Term = n.getCurrentTerm()
+				requestVote.result <- response
 			case req := <-n.stateUpdateRequestCh:
 				log.Printf("Incoming request: %s", req.cmd)
 				req.response <- 200
@@ -353,11 +491,6 @@ func (n *Node) issueAppendEntries(ctx context.Context, appendEntries AppendEntri
 	return result, err
 }
 
-type requestVoteRpcCall struct {
-	data     RequestVote
-	response chan RequestVoteResult
-}
-
 func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(50 * time.Millisecond)
 	body, err := io.ReadAll(r.Body)
@@ -372,17 +505,9 @@ func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	n.dlog("RequestVoteRPC from %s", requestVote.CandidateId)
-	response := RequestVoteResult{}
-	if requestVote.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-		n.dlog("vote for %s", requestVote.CandidateId)
-		n.ElectionTimer.Reset(generateElectionTimeout())
-		n.setState(Follower)
-		n.setCurrentTerm(requestVote.Term)
-		n.setVotedFor(requestVote.CandidateId)
-		response.VoteGranted = true
-	}
-	response.Term = n.getCurrentTerm()
+	responseCh := make(chan RequestVoteResult)
+	n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}
+	response := <-responseCh
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		log.Printf("could not serialize response body: %s", err.Error())
@@ -409,15 +534,9 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	n.dlog("AppendRequestRPC from %s", appendEntries.LeaderId)
-	response := AppendEntriesResult{}
-	if appendEntries.Term >= n.getCurrentTerm() {
-		n.ElectionTimer.Reset(generateElectionTimeout())
-		n.setCurrentTerm(appendEntries.Term)
-		n.setState(Follower)
-		response.Success = true
-	}
-	response.Term = n.getCurrentTerm()
+	responseCh := make(chan AppendEntriesResult)
+	n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}
+	response := <-responseCh
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		log.Printf("could not serialize response body: %s", err.Error())
