@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,16 +37,34 @@ type Node struct {
 	CurrentTerm   int
 	State         State
 	ElectionTimer *time.Timer
+	shutdown      chan struct{}
+	nodes         map[NodeId]string
+	otherNodeIds  []NodeId
+	StateMachine  *StateMachine
+	httpServer    *http.Server
+	reportTick    *time.Ticker
+	verbose       bool
+}
 
-	nodes        map[NodeId]string
-	otherNodeIds []NodeId
-	StateMachine *StateMachine
+func (n *Node) Verbose() *Node {
+	n.verbose = true
+	return n
 }
 
 func (n *Node) getCurrentTerm() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.CurrentTerm
+}
+
+func NewNode(id NodeId, nodes map[NodeId]string) *Node {
+	otherNodeIds := []NodeId{}
+	for otherId := range nodes {
+		if id != otherId {
+			otherNodeIds = append(otherNodeIds, otherId)
+		}
+	}
+	return &Node{Id: id, nodes: nodes, StateMachine: NewStateMachine(), shutdown: make(chan struct{}), otherNodeIds: otherNodeIds}
 }
 
 func (n *Node) incrementTerm() int {
@@ -104,36 +123,47 @@ func (n *Node) getVotesHave() int {
 	return n.VotesHave
 }
 
-func (n *Node) Run() error {
-	host := n.nodes[n.Id]
-	for id := range n.nodes {
-		if n.Id != id {
-			n.otherNodeIds = append(n.otherNodeIds, id)
-		}
+func (n *Node) Shutdown() {
+	n.shutdown <- struct{}{}
+	if err := n.httpServer.Shutdown(context.Background()); err != nil {
+		log.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
-	log.Printf("spinning a node at %v", host)
+	if n.reportTick != nil {
+		n.reportTick.Stop()
+	}
+}
 
-	go n.runServer(host)
+func (n *Node) StartReporting() {
+	n.reportTick = time.NewTicker(time.Second)
+	go func() {
+		for range n.reportTick.C {
+			n.report()
+		}
+	}()
+}
+
+func (n *Node) Run() {
+	go n.runServer()
 
 	n.VotedFor = EmptyId
 	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
 	defer n.ElectionTimer.Stop()
 
 	heartbeatTimer := time.NewTimer(heartbeatPeriod)
+	heartbeatTimer.Stop()
 	defer heartbeatTimer.Stop()
-
-	reportTick := time.NewTicker(time.Second)
-	defer reportTick.Stop()
-	go func() {
-		for range reportTick.C {
-			n.report()
-		}
-	}()
 
 	requestVoteResponse := make(chan RequestVoteResult)
 	appendEntriesResponse := make(chan AppendEntriesResult)
 
-	for {
+	run := atomic.Bool{}
+	run.Store(true)
+	go func() {
+		<-n.shutdown
+		run.Store(false)
+	}()
+
+	for run.Load() {
 		state := n.getState()
 		if state == Follower {
 			select {
@@ -147,12 +177,12 @@ func (n *Node) Run() error {
 				for i := range n.otherNodeIds {
 					nodeHost := n.nodes[n.otherNodeIds[i]]
 					go func() {
-						dlog("issuing RequestVote to %s", n.otherNodeIds[i])
+						n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
 						result, err := n.issueRequestVote(context.Background(), nodeHost)
 						if err != nil {
-							dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+							n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
+							n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
 							requestVoteResponse <- result
 						}
 					}()
@@ -165,22 +195,22 @@ func (n *Node) Run() error {
 				term := n.incrementTerm()
 				n.setVotedFor(n.Id)
 				n.setVotesHave(1)
-				dlog("term %d: election", term)
+				n.dlog("term %d: election", term)
 				for i := range n.otherNodeIds {
 					nodeHost := n.nodes[n.otherNodeIds[i]]
 					go func() {
-						dlog("issuing RequestVote to %s", n.otherNodeIds[i])
+						n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
 						result, err := n.issueRequestVote(context.Background(), nodeHost)
 						if err != nil {
-							dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+							n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
+							n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
 							requestVoteResponse <- result
 						}
 					}()
 				}
 			case response := <-requestVoteResponse:
-				dlog("RequestVoteResponse from someone: %+v", response)
+				n.dlog("RequestVoteResponse from someone: %+v", response)
 				n.ElectionTimer.Reset(generateElectionTimeout())
 				if response.Term > n.getCurrentTerm() {
 					n.setState(Follower)
@@ -190,8 +220,9 @@ func (n *Node) Run() error {
 					// check vote sources?
 					votes := n.incrementVotesHave()
 					if votes > len(n.nodes)/2 || len(n.nodes) == votes {
-						dlog("Leader now")
+						n.dlog("Leader now")
 						n.setState(Leader)
+						heartbeatTimer.Reset(heartbeatPeriod)
 					}
 				}
 			}
@@ -205,12 +236,12 @@ func (n *Node) Run() error {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
+						n.dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
 						result, err := n.issueAppendEntries(appendEntriesCtx, nodeHost)
 						if err != nil {
-							dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+							n.dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 						} else {
-							dlog("AppendEntriesResponse from %s: %+v", n.otherNodeIds[i], result)
+							n.dlog("AppendEntriesResponse from %s: %+v", n.otherNodeIds[i], result)
 							appendEntriesResponse <- result
 						}
 					}()
@@ -314,10 +345,10 @@ func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	dlog("RequestVoteRPC from %s", requestVote.CandidateId)
+	n.dlog("RequestVoteRPC from %s", requestVote.CandidateId)
 	response := RequestVoteResult{}
 	if requestVote.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-		dlog("vote for %s", requestVote.CandidateId)
+		n.dlog("vote for %s", requestVote.CandidateId)
 		n.ElectionTimer.Reset(generateElectionTimeout())
 		n.setState(Follower)
 		n.setCurrentTerm(requestVote.Term)
@@ -351,7 +382,7 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		return
 	}
-	dlog("AppendRequestRPC from %s", appendEntries.LeaderId)
+	n.dlog("AppendRequestRPC from %s", appendEntries.LeaderId)
 	response := AppendEntriesResult{}
 	if appendEntries.Term >= n.getCurrentTerm() {
 		n.ElectionTimer.Reset(generateElectionTimeout())
@@ -373,19 +404,40 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (n *Node) runServer(host string) {
+type RaftState struct {
+	State State
+	Term  int
+}
+
+func (n *Node) handlerRaftState(w http.ResponseWriter, r *http.Request) {
+	state := RaftState{n.getState(), n.getCurrentTerm()}
+	stateBytes, err := json.Marshal(&state)
+	if err != nil {
+		log.Printf("Could not marshal RaftState: %s", err.Error())
+		w.WriteHeader(500)
+	}
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(stateBytes)
+}
+
+func (n *Node) runServer() {
 	log.SetOutput(os.Stdout)
-	// http.HandleFunc("POST /{key}", n.handlerRequestVote)
-	// http.HandleFunc("DELETE /{key}", n.handlerRequestVote)
-	http.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
-	http.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
-	if err := http.ListenAndServe(host, nil); err != nil {
-		log.Fatal(err.Error())
+	handler := http.NewServeMux()
+	// handler.HandleFunc("POST /{key}", n.handlerRequestVote)
+	// handler.HandleFunc("DELETE /{key}", n.handlerRequestVote)
+	handler.HandleFunc("GET /raft", n.handlerRaftState)
+	handler.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
+	handler.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
+	host := n.nodes[n.Id]
+	log.Printf("Running HTTP server at %v", host)
+	n.httpServer = &http.Server{Addr: host, Handler: handler}
+	if err := n.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("http server error: %s", err.Error())
 	}
 }
 
-func dlog(format string, v ...any) {
-	if *flagVerbose {
+func (n *Node) dlog(format string, v ...any) {
+	if n.verbose {
 		log.Printf(format, v...)
 	}
 }
@@ -417,8 +469,10 @@ func main() {
 
 	log.SetPrefix(fmt.Sprintf("[%s] ", nodeId))
 	log.SetFlags(log.Lmicroseconds)
-	node := Node{Id: nodeId, StateMachine: NewStateMachine(), nodes: nodes}
-	if err := node.Run(); err != nil {
-		log.Fatal(err.Error())
+	node := NewNode(nodeId, nodes)
+	if *flagVerbose {
+		node.Verbose()
 	}
+	node.StartReporting()
+	node.Run()
 }

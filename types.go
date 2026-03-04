@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type RequestVote struct {
 	Term         int
@@ -49,6 +52,29 @@ func (id NodeId) String() string {
 }
 
 type State int
+
+func (s State) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + s.String() + `"`), nil
+}
+
+func (s *State) UnmarshalJSON(p []byte) error {
+	if string(p) == `"Follower"` {
+		*s = Follower
+		return nil
+	}
+	if string(p) == `"Candidate"` {
+		*s = Candidate
+		return nil
+	}
+	if string(p) == `"Leader"` {
+		*s = Leader
+		return nil
+	}
+	intvalue := int(*s)
+	err := json.Unmarshal(p, &intvalue)
+	*s = State(intvalue)
+	return err
+}
 
 func (s State) String() string {
 	if s == Follower {
