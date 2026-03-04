@@ -197,226 +197,122 @@ func (n *Node) eventLoop() {
 	}()
 
 	for run.Load() {
-		// select {
-		// case appendEntries := <-n.appendEntriesRpc:
-		// 	n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
-		// 	response := AppendEntriesResult{}
-		// 	if appendEntries.data.Term >= n.getCurrentTerm() {
-		// 		n.ElectionTimer.Reset(generateElectionTimeout())
-		// 		n.setCurrentTerm(appendEntries.data.Term)
-		// 		if n.setState(Follower) == Leader {
-		// 			n.heartbeatTimer.Stop()
-		// 		}
-		// 		response.Success = true
-		// 	}
-		// 	response.Term = n.getCurrentTerm()
-		// 	appendEntries.result <- response
-		// case requestVote := <-n.requestVoteRpc:
-		// 	n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
-		// 	response := RequestVoteResult{}
-		// 	if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-		// 		n.dlog("vote for %s", requestVote.data.CandidateId)
-		// 		if n.setState(Follower) == Leader {
-		// 			n.heartbeatTimer.Stop()
-		// 		}
-		// 		n.setCurrentTerm(requestVote.data.Term)
-		// 		n.setVotedFor(requestVote.data.CandidateId)
-		// 		response.VoteGranted = true
-		// 	}
-		// 	response.Term = n.getCurrentTerm()
-		// 	requestVote.result <- response
-		// case <-n.ElectionTimer.C:
-		// 	n.setState(Candidate)
-		// 	term := n.incrementTerm()
-		// 	n.setVotedFor(n.Id)
-		// 	n.setVotesHave(1)
-		// 	log.Printf("Term %d: election", term)
-		// 	for i := range n.otherNodeIds {
-		// 		nodeHost := n.nodes[n.otherNodeIds[i]]
-		// 		go func() {
-		// 			n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
-		// 			result, err := n.issueRequestVote(context.Background(), nodeHost)
-		// 			if err != nil {
-		// 				n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
-		// 			} else {
-		// 				n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
-		// 				requestVoteResponse <- result
-		// 			}
-		// 		}()
-		// 	}
-		// }
-
-		state := n.getState()
-		if state == Follower {
-			select {
-			case appendEntries := <-n.appendEntriesRpc:
-				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
-				response := AppendEntriesResult{}
-				if appendEntries.data.Term >= n.getCurrentTerm() {
-					n.ElectionTimer.Reset(generateElectionTimeout())
-					n.setCurrentTerm(appendEntries.data.Term)
-					if n.setState(Follower) == Leader {
-						n.heartbeatTimer.Stop()
-					}
-					response.Success = true
-				}
-				response.Term = n.getCurrentTerm()
-				appendEntries.result <- response
-			case requestVote := <-n.requestVoteRpc:
-				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
-				response := RequestVoteResult{}
-				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-					n.dlog("vote for %s", requestVote.data.CandidateId)
-					n.setState(Follower)
-					n.setCurrentTerm(requestVote.data.Term)
-					n.setVotedFor(requestVote.data.CandidateId)
-					response.VoteGranted = true
-				}
-				response.Term = n.getCurrentTerm()
-				requestVote.result <- response
-			case <-n.ElectionTimer.C:
-				n.setState(Candidate)
-				term := n.incrementTerm()
-				n.setVotedFor(n.Id)
-				n.setVotesHave(1)
-				log.Printf("Term %d: election", term)
-				for i := range n.otherNodeIds {
-					nodeHost := n.nodes[n.otherNodeIds[i]]
-					go func() {
-						n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
-						result, err := n.issueRequestVote(context.Background(), nodeHost)
-						if err != nil {
-							n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
-						} else {
-							n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
-							requestVoteResponse <- result
-						}
-					}()
-				}
-			}
-			n.ElectionTimer.Reset(generateElectionTimeout())
-		} else if state == Candidate {
-			select {
-			case appendEntries := <-n.appendEntriesRpc:
-				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
-				response := AppendEntriesResult{}
-				if appendEntries.data.Term >= n.getCurrentTerm() {
-					n.ElectionTimer.Reset(generateElectionTimeout())
-					n.setCurrentTerm(appendEntries.data.Term)
-					if n.setState(Follower) == Leader {
-						n.heartbeatTimer.Stop()
-					}
-					response.Success = true
-				}
-				response.Term = n.getCurrentTerm()
-				appendEntries.result <- response
-			case requestVote := <-n.requestVoteRpc:
-				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
-				response := RequestVoteResult{}
-				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-					n.dlog("vote for %s", requestVote.data.CandidateId)
-					n.setState(Follower)
-					n.setCurrentTerm(requestVote.data.Term)
-					n.setVotedFor(requestVote.data.CandidateId)
-					response.VoteGranted = true
-				}
-				response.Term = n.getCurrentTerm()
-				requestVote.result <- response
-			case <-n.ElectionTimer.C:
-				term := n.incrementTerm()
-				n.setVotedFor(n.Id)
-				n.setVotesHave(1)
-				n.dlog("term %d: election", term)
-				for i := range n.otherNodeIds {
-					nodeHost := n.nodes[n.otherNodeIds[i]]
-					go func() {
-						n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
-						result, err := n.issueRequestVote(context.Background(), nodeHost)
-						if err != nil {
-							n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
-						} else {
-							n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
-							requestVoteResponse <- result
-						}
-					}()
-				}
-				if len(n.otherNodeIds) == 0 {
-					log.Printf("Leader now")
-					n.setState(Leader)
-					n.heartbeatTimer.Reset(heartbeatPeriod)
-				}
-			case response := <-requestVoteResponse:
-				n.dlog("RequestVoteResponse from someone: %+v", response)
-				if response.Term > n.getCurrentTerm() {
-					n.setState(Follower)
-					break
-				}
-				if response.VoteGranted {
-					// TODO: check vote source
-					votes := n.incrementVotesHave()
-					if votes > len(n.nodes)/2 {
-						log.Printf("Leader now")
-						n.setState(Leader)
-						n.heartbeatTimer.Reset(heartbeatPeriod)
-					}
-				}
-			}
-			n.ElectionTimer.Reset(generateElectionTimeout())
-		} else if state == Leader {
-			select {
-			case appendEntries := <-n.appendEntriesRpc:
-				n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
-				response := AppendEntriesResult{}
-				if appendEntries.data.Term >= n.getCurrentTerm() {
-					n.ElectionTimer.Reset(generateElectionTimeout())
-					n.setCurrentTerm(appendEntries.data.Term)
-					if n.setState(Follower) == Leader {
-						n.heartbeatTimer.Stop()
-					}
-					response.Success = true
-				}
-				response.Term = n.getCurrentTerm()
-				appendEntries.result <- response
-			case requestVote := <-n.requestVoteRpc:
-				n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
-				response := RequestVoteResult{}
-				if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
-					n.dlog("vote for %s", requestVote.data.CandidateId)
-					n.setState(Follower)
-					n.setCurrentTerm(requestVote.data.Term)
-					n.setVotedFor(requestVote.data.CandidateId)
-					response.VoteGranted = true
+		select {
+		case appendEntries := <-n.appendEntriesRpc:
+			n.dlog("AppendRequestRPC from %s", appendEntries.data.LeaderId)
+			response := AppendEntriesResult{}
+			if appendEntries.data.Term >= n.getCurrentTerm() {
+				n.ElectionTimer.Reset(generateElectionTimeout())
+				n.setCurrentTerm(appendEntries.data.Term)
+				if n.setState(Follower) == Leader {
 					n.heartbeatTimer.Stop()
 				}
-				response.Term = n.getCurrentTerm()
-				requestVote.result <- response
-			case req := <-n.stateUpdateRequestCh:
-				log.Printf("Incoming request: %s", req.cmd)
-				req.response <- 200
-			case <-n.heartbeatTimer.C:
-				appendEntriesCtx := context.Background()
-				for i := range n.otherNodeIds {
-					nodeHost := n.nodes[n.otherNodeIds[i]]
-					go func() {
-						n.dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
-						result, err := n.issueAppendEntries(appendEntriesCtx, AppendEntries{
-							Term:     n.getCurrentTerm(),
-							LeaderId: n.Id,
-						}, nodeHost)
-						if err != nil {
-							n.dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
-						} else {
-							n.dlog("AppendEntriesResponse from %s: %+v", n.otherNodeIds[i], result)
-							appendEntriesResponse <- result
-						}
-					}()
+				response.Success = true
+			}
+			response.Term = n.getCurrentTerm()
+			appendEntries.result <- response
+		case requestVote := <-n.requestVoteRpc:
+			n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
+			response := RequestVoteResult{}
+			if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+				n.dlog("vote for %s", requestVote.data.CandidateId)
+				if n.setState(Follower) == Leader {
+					n.heartbeatTimer.Stop()
 				}
-			case response := <-appendEntriesResponse:
-				if response.Term > n.getCurrentTerm() {
-					n.setState(Follower)
-					break
+				n.setCurrentTerm(requestVote.data.Term)
+				n.setVotedFor(requestVote.data.CandidateId)
+				response.VoteGranted = true
+			}
+			response.Term = n.getCurrentTerm()
+			requestVote.result <- response
+		case <-n.ElectionTimer.C:
+			n.setState(Candidate)
+			term := n.incrementTerm()
+			n.setVotedFor(n.Id)
+			n.setVotesHave(1)
+			log.Printf("Term %d: election", term)
+			for i := range n.otherNodeIds {
+				nodeHost := n.nodes[n.otherNodeIds[i]]
+				go func() {
+					n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
+					result, err := n.issueRequestVote(context.Background(), nodeHost)
+					if err != nil {
+						n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+					} else {
+						n.dlog("RequestVoteResponse from %s: %+v", n.otherNodeIds[i], result)
+						requestVoteResponse <- result
+					}
+				}()
+			}
+			if len(n.otherNodeIds) == 0 {
+				log.Printf("Leader now")
+				n.setState(Leader)
+				n.ElectionTimer.Stop()
+				n.heartbeatTimer.Reset(heartbeatPeriod)
+			}
+		case response := <-requestVoteResponse:
+			if state := n.getState(); state != Candidate {
+				log.Printf("Warning: got RequestVoteRPCResult in state %s", state)
+				break
+			}
+			if response.Term > n.getCurrentTerm() {
+				n.setState(Follower)
+				n.ElectionTimer.Reset(generateElectionTimeout())
+				n.heartbeatTimer.Stop()
+				break
+			}
+			if response.VoteGranted {
+				// TODO: check vote source
+				votes := n.incrementVotesHave()
+				if votes*2 > len(n.nodes) {
+					log.Printf("Leader now")
+					n.setState(Leader)
+					n.ElectionTimer.Stop()
+					n.heartbeatTimer.Reset(heartbeatPeriod)
 				}
 			}
+
+		case response := <-appendEntriesResponse:
+			if state := n.getState(); state != Leader {
+				log.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
+				break
+			}
+			if response.Term > n.getCurrentTerm() {
+				n.setState(Follower)
+			}
+		case <-n.heartbeatTimer.C:
+			if state := n.getState(); state != Leader {
+				log.Printf("Warning: got heartbeatTimer tick in state %s", state)
+				break
+			}
+			appendEntriesCtx := context.Background()
+			for i := range n.otherNodeIds {
+				nodeHost := n.nodes[n.otherNodeIds[i]]
+				go func() {
+					n.dlog("issuing AppendEntries to %s", n.otherNodeIds[i])
+					result, err := n.issueAppendEntries(appendEntriesCtx, AppendEntries{
+						Term:     n.getCurrentTerm(),
+						LeaderId: n.Id,
+					}, nodeHost)
+					if err != nil {
+						n.dlog("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+					} else {
+						n.dlog("AppendEntriesResponse from %s: %+v", n.otherNodeIds[i], result)
+						appendEntriesResponse <- result
+					}
+				}()
+			}
+		case req := <-n.stateUpdateRequestCh:
+			log.Printf("Incoming request: %s", req.cmd)
+			req.response <- 200
+		}
+
+		switch n.getState() {
+		case Follower:
+			n.ElectionTimer.Reset(generateElectionTimeout())
+		case Candidate:
+			n.ElectionTimer.Reset(generateElectionTimeout())
+		case Leader:
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
@@ -424,7 +320,7 @@ func (n *Node) eventLoop() {
 
 func (n *Node) report() {
 	n.mu.Lock()
-	log.Printf("State => %s. Term => %d. VotedFor => %s.", n.State, n.CurrentTerm, n.VotedFor)
+	log.Printf("State => %s. Term => %d.", n.State, n.CurrentTerm)
 	n.mu.Unlock()
 }
 
