@@ -144,12 +144,6 @@ func (n *Node) setVotesHave(value int) {
 	n.VotesHave = value
 }
 
-func (n *Node) getVotesHave() int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.VotesHave
-}
-
 func (n *Node) Shutdown() {
 	n.shutdown <- struct{}{}
 	if err := n.httpServer.Shutdown(context.Background()); err != nil {
