@@ -25,7 +25,7 @@ func (n *Node) clientHandlerRaft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Node) clientHandlerGet(w http.ResponseWriter, r *http.Request) {
-	value, ok := n.StateMachine.Get(r.PathValue("key"))
+	value, ok := n.stateMachine.Get(r.PathValue("key"))
 	if ok {
 		w.Write(value)
 	} else {

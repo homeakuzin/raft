@@ -52,18 +52,18 @@ type updateRequest struct {
 type Node struct {
 	mu                   sync.Mutex
 	Id                   NodeId
-	VotedFor             NodeId
-	VotesHave            int
-	CurrentTerm          int
-	State                State
-	ElectionTimer        *time.Timer
+	votedFor             NodeId
+	votesHave            int
+	currentTerm          int
+	state                State
+	electionTimer        *time.Timer
 	heartbeatTimer       *time.Timer
 	shutdown             chan struct{}
 	nodes                map[NodeId]string
 	otherNodeIds         []NodeId
 	nextIndex            map[NodeId]int
 	matchIndex           map[NodeId]int
-	StateMachine         *StateMachine
+	stateMachine         *StateMachine
 	httpServer           *http.Server
 	clientServer         *http.Server
 	reportTick           *time.Ticker
@@ -84,7 +84,7 @@ func (n *Node) Verbose() *Node {
 func (n *Node) getCurrentTerm() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.CurrentTerm
+	return n.currentTerm
 }
 
 func NewNode(id NodeId, nodes map[NodeId]string) *Node {
@@ -96,7 +96,7 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 	}
 	return &Node{Id: id,
 		nodes:                nodes,
-		StateMachine:         NewStateMachine(),
+		stateMachine:         NewStateMachine(),
 		stateUpdateRequestCh: make(chan updateRequest),
 		shutdown:             make(chan struct{}),
 		otherNodeIds:         otherNodeIds,
@@ -116,53 +116,53 @@ func (n *Node) LogPrefixId() *Node {
 func (n *Node) incrementTerm() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.CurrentTerm++
-	return n.CurrentTerm
+	n.currentTerm++
+	return n.currentTerm
 }
 
 func (n *Node) setCurrentTerm(term int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.CurrentTerm = term
+	n.currentTerm = term
 }
 
 func (n *Node) getState() State {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.State
+	return n.state
 }
 
 func (n *Node) setState(s State) State {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	was := n.State
-	n.State = s
+	was := n.state
+	n.state = s
 	return was
 }
 
 func (n *Node) getVotedFor() NodeId {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.VotedFor
+	return n.votedFor
 }
 
 func (n *Node) setVotedFor(id NodeId) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.VotedFor = id
+	n.votedFor = id
 }
 
 func (n *Node) incrementVotesHave() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.VotesHave++
-	return n.VotesHave
+	n.votesHave++
+	return n.votesHave
 }
 
 func (n *Node) setVotesHave(value int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.VotesHave = value
+	n.votesHave = value
 }
 
 func (n *Node) Shutdown() {
@@ -193,8 +193,8 @@ func (n *Node) Run() {
 			n.Shutdown()
 		}
 	}()
-	n.VotedFor = EmptyId
-	n.ElectionTimer = time.NewTimer(generateElectionTimeout())
+	n.votedFor = EmptyId
+	n.electionTimer = time.NewTimer(generateElectionTimeout())
 
 	n.heartbeatTimer = time.NewTimer(heartbeatPeriod)
 	n.heartbeatTimer.Stop()
@@ -228,26 +228,26 @@ func (n *Node) eventLoop() {
 				n.becomeFollower()
 				response.Success = true
 			}
-			if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
-				n.StateMachine.Apply(appendEntries.data.LeaderCommit)
-				n.StateMachine.SetCommitIndex(appendEntries.data.LeaderCommit)
+			if appendEntries.data.LeaderCommit > n.stateMachine.CommitIndex() {
+				n.stateMachine.Apply(appendEntries.data.LeaderCommit)
+				n.stateMachine.SetCommitIndex(appendEntries.data.LeaderCommit)
 				n.logger.Printf("Applied commit index %d", appendEntries.data.LeaderCommit)
 			}
 			if len(appendEntries.data.Entries) > 0 {
 				if appendEntries.data.PrevLogIndex > 0 {
-					lastEntry, ok := n.StateMachine.At(appendEntries.data.PrevLogIndex)
+					lastEntry, ok := n.stateMachine.At(appendEntries.data.PrevLogIndex)
 					if ok {
 						if lastEntry.Term == appendEntries.data.PrevLogTerm {
 							response.Success = true
-							n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+							n.stateMachine.AppendLogs(appendEntries.data.Entries...)
 							n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 						} else {
-							n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
+							n.stateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
 						}
 					}
 				} else {
 					response.Success = true
-					n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+					n.stateMachine.AppendLogs(appendEntries.data.Entries...)
 					n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 				}
 			}
@@ -264,7 +264,7 @@ func (n *Node) eventLoop() {
 			}
 			response.Term = n.getCurrentTerm()
 			requestVote.result <- response
-		case <-n.ElectionTimer.C:
+		case <-n.electionTimer.C:
 			n.becomeCandidate()
 			for i := range n.otherNodeIds {
 				nodeHost := n.nodes[n.otherNodeIds[i]]
@@ -337,7 +337,7 @@ func (n *Node) eventLoop() {
 				n.nextIndex[appendEntriesResult.id] += len(appendEntriesResult.request.Entries)
 				n.matchIndex[appendEntriesResult.id] = n.nextIndex[appendEntriesResult.id] - 1
 				matchCount := 1
-				commitIndex := n.StateMachine.CommitIndex()
+				commitIndex := n.stateMachine.CommitIndex()
 				for _, peerId := range n.otherNodeIds {
 					if n.matchIndex[peerId] > commitIndex {
 						matchCount++
@@ -346,8 +346,8 @@ func (n *Node) eventLoop() {
 				if matchCount*2 > len(n.otherNodeIds)+1 {
 					commitIndex += len(appendEntriesResult.request.Entries)
 					n.logger.Printf("set CommitIndex = %d", commitIndex)
-					n.StateMachine.SetCommitIndex(commitIndex)
-					n.StateMachine.Apply(commitIndex)
+					n.stateMachine.SetCommitIndex(commitIndex)
+					n.stateMachine.Apply(commitIndex)
 					appendEntriesResult.client <- 200
 				}
 			} else {
@@ -367,7 +367,7 @@ func (n *Node) eventLoop() {
 			}
 		case req := <-n.stateUpdateRequestCh:
 			n.logger.Printf("Incoming request: %s", req.cmd)
-			n.StateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
+			n.stateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				nodeHost := n.nodes[id]
 				go func() {
@@ -384,9 +384,9 @@ func (n *Node) eventLoop() {
 
 		switch n.getState() {
 		case Follower:
-			n.ElectionTimer.Reset(generateElectionTimeout())
+			n.electionTimer.Reset(generateElectionTimeout())
 		case Candidate:
-			n.ElectionTimer.Reset(generateElectionTimeout())
+			n.electionTimer.Reset(generateElectionTimeout())
 		case Leader:
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
@@ -400,16 +400,16 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 	entries := make([]Entry, 0)
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := 0
-	if prevLogIndex < n.StateMachine.Len() {
-		entries = n.StateMachine.NextEntriesForFollower(nextIndex)
+	if prevLogIndex < n.stateMachine.Len() {
+		entries = n.stateMachine.NextEntriesForFollower(nextIndex)
 		if prevLogIndex > 0 {
-			prevLogTerm = n.StateMachine.MustAt(prevLogIndex).Term
+			prevLogTerm = n.stateMachine.MustAt(prevLogIndex).Term
 		}
 	}
 	return AppendEntries{
 		Term:         n.getCurrentTerm(),
 		LeaderId:     n.Id,
-		LeaderCommit: n.StateMachine.CommitIndex(),
+		LeaderCommit: n.stateMachine.CommitIndex(),
 		Entries:      entries,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
@@ -430,7 +430,7 @@ func (n *Node) becomeFollower() {
 	if n.setState(Follower) != Follower {
 		n.logger.Printf("Turning to a Follower")
 	}
-	n.ElectionTimer.Reset(generateElectionTimeout())
+	n.electionTimer.Reset(generateElectionTimeout())
 	n.heartbeatTimer.Stop()
 }
 
@@ -439,16 +439,16 @@ func (n *Node) becomeLeader() {
 		n.logger.Printf("Turning to a Leader")
 	}
 	for _, id := range n.otherNodeIds {
-		n.nextIndex[id] = n.StateMachine.LastApplied() + 1
+		n.nextIndex[id] = n.stateMachine.LastApplied() + 1
 		n.matchIndex[id] = 0
 	}
-	n.ElectionTimer.Stop()
+	n.electionTimer.Stop()
 	n.heartbeatTimer.Reset(heartbeatPeriod)
 }
 
 func (n *Node) report() {
 	n.mu.Lock()
-	n.logger.Printf("State => %s. Term => %d.", n.State, n.CurrentTerm)
+	n.logger.Printf("State => %s. Term => %d.", n.state, n.currentTerm)
 	n.mu.Unlock()
 }
 
