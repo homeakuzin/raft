@@ -1,8 +1,8 @@
 package main_test
 
 import (
-	. "hyperraft"
-	"hyperraft/pkg/asserts"
+	. "raft"
+	"raft/pkg/asserts"
 	"testing"
 )
 
