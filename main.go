@@ -271,9 +271,6 @@ func (n *Node) eventLoop() {
 					}
 				}()
 			}
-			if n.isSingleNode() {
-				n.becomeLeader()
-			}
 		case response := <-requestVoteResponse:
 			if state := n.getState(); state != Candidate {
 				log.Printf("Warning: got RequestVoteRPCResult in state %s", state)
@@ -363,24 +360,18 @@ func (n *Node) eventLoop() {
 			}
 		case req := <-n.stateUpdateRequestCh:
 			log.Printf("Incoming request: %s", req.cmd)
-			index := n.StateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
-			if n.isSingleNode() {
-				n.StateMachine.Apply(index)
-				req.response <- 200
-				break
-			} else {
-				for _, id := range n.otherNodeIds {
-					nodeHost := n.nodes[id]
-					go func() {
-						appendEntries := n.makeAppendEntries(id)
-						result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
-						if err != nil {
-							log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
-						} else {
-							appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.response, id}
-						}
-					}()
-				}
+			n.StateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
+			for _, id := range n.otherNodeIds {
+				nodeHost := n.nodes[id]
+				go func() {
+					appendEntries := n.makeAppendEntries(id)
+					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
+					if err != nil {
+						log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+					} else {
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.response, id}
+					}
+				}()
 			}
 		}
 
@@ -416,10 +407,6 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
 	}
-}
-
-func (n *Node) isSingleNode() bool {
-	return len(n.otherNodeIds) == 0
 }
 
 func (n *Node) becomeCandidate() {
@@ -627,6 +614,10 @@ func main() {
 			log.Fatal("Incorrect -nodes usage")
 		}
 		nodes[NodeId(nodeIdInt)] = idHostAndPort[1] + ":" + idHostAndPort[2]
+	}
+
+	if len(nodes) < 3 {
+		log.Fatalf("We work with 3 nodes minimum")
 	}
 
 	if _, ok := nodes[NodeId(*flagNodeId)]; !ok {

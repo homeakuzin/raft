@@ -96,36 +96,6 @@ func TestConsensys(t *testing.T) {
 	asserts.Equal(t, secondTerm, state.Term)
 }
 
-func TestSingleNode(t *testing.T) {
-	nodes := map[NodeId]string{
-		1: "localhost:5015",
-	}
-	node := NewNode(1, nodes)
-	defer node.Shutdown()
-	go node.Run()
-	go node.RunClientServer("localhost:5016")
-	waitABit()
-	state := nodeState(t, "localhost:5016")
-	asserts.Equal(t, Leader, state.State)
-}
-
-func TestKeyValueSingleNode(t *testing.T) {
-	// nodes := map[NodeId]string{
-	// 	1: "localhost:5015",
-	// }
-	// node := NewNode(1, nodes)
-	// defer node.Shutdown()
-	// go node.Run()
-	// go node.RunClientServer("localhost:5016")
-	// waitABit()
-	// value, status := sendGetRequest(t, "localhost:5016", "x")
-	// asserts.Equal(t, 404, status)
-	// sendSetRequest(t, "localhost:5016", "x", []byte{'3'})
-	// value, status = sendGetRequest(t, "localhost:5016", "x")
-	// asserts.Equal(t, 200, status)
-	// asserts.Equal(t, "3", string(value))
-}
-
 func TestKeyValueReplication(t *testing.T) {
 	nodes := map[NodeId]string{
 		1: "localhost:5010",
