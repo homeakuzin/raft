@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"raft/storage"
 	"strconv"
 	"strings"
 	"sync"
@@ -651,7 +652,7 @@ func main() {
 		go http.ListenAndServe(*flagMetricsAddr, nil)
 	}
 
-	kvStorage := &KVStorage{state: map[string]string{}}
+	kvStorage := storage.NewKVStorage()
 	node := NewNode(nodeId, nodes, kvStorage)
 	if *flagVerbose {
 		node.Verbose()

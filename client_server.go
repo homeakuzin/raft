@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"raft/storage"
 )
 
 type RaftState struct {
@@ -14,7 +15,7 @@ type RaftState struct {
 }
 
 type ClientServer struct {
-	storage *KVStorage
+	storage *storage.KVStorage
 	node    *Node
 }
 
@@ -57,8 +58,8 @@ func (s ClientServer) clientHandlerUpdate(w http.ResponseWriter, r *http.Request
 		w.Write([]byte("Node is not a leader"))
 		return
 	}
-	cmd := Command{
-		Action: ActionSet,
+	cmd := storage.Command{
+		Action: storage.ActionSet,
 		Key:    r.PathValue("key"),
 		Value:  string(value),
 	}
@@ -89,7 +90,7 @@ func (s ClientServer) clientHandlerDelete(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func RunClientServer(addr string, node *Node, storage *KVStorage) error {
+func RunClientServer(addr string, node *Node, storage *storage.KVStorage) error {
 	kvServer := ClientServer{storage, node}
 	handler := http.NewServeMux()
 	handler.HandleFunc("GET /{key}", kvServer.clientHandlerGet)

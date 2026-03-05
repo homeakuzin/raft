@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"raft/pkg/asserts"
+	"raft/storage"
 	"testing"
 	"time"
 )
@@ -24,10 +25,10 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5511",
 		3: "localhost:5512",
 	}
-	kv1 := &KVStorage{state: map[string]string{}}
-	kv2 := &KVStorage{state: map[string]string{}}
-	kv3 := &KVStorage{state: map[string]string{}}
-	kvs := map[NodeId]*KVStorage{
+	kv1 := storage.NewKVStorage()
+	kv2 := storage.NewKVStorage()
+	kv3 := storage.NewKVStorage()
+	kvs := map[NodeId]*storage.KVStorage{
 		1: kv1,
 		2: kv2,
 		3: kv3,
@@ -109,10 +110,10 @@ func TestKeyValueReplication(t *testing.T) {
 		2: "localhost:5531",
 		3: "localhost:5532",
 	}
-	kv1 := &KVStorage{state: map[string]string{}}
-	kv2 := &KVStorage{state: map[string]string{}}
-	kv3 := &KVStorage{state: map[string]string{}}
-	kvs := map[NodeId]*KVStorage{
+	kv1 := storage.NewKVStorage()
+	kv2 := storage.NewKVStorage()
+	kv3 := storage.NewKVStorage()
+	kvs := map[NodeId]*storage.KVStorage{
 		1: kv1,
 		2: kv2,
 		3: kv3,
