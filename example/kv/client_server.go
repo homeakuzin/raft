@@ -1,4 +1,4 @@
-package raft
+package main
 
 import (
 	"encoding/json"
@@ -6,21 +6,22 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"raft"
 	"raft/storage"
 )
 
 type RaftState struct {
-	State State
+	State raft.State
 	Term  int
 }
 
 type ClientServer struct {
 	storage *storage.KVStorage
-	node    *Node
+	node    *raft.Node
 }
 
 func (s ClientServer) clientHandlerRaft(w http.ResponseWriter, r *http.Request) {
-	state := RaftState{s.node.getState(), s.node.getCurrentTerm()}
+	state := RaftState{s.node.State(), s.node.CurrentTerm()}
 	stateBytes, err := json.Marshal(&state)
 	if err != nil {
 		log.Printf("Could not marshal RaftState: %s", err.Error())
@@ -52,7 +53,7 @@ func (s ClientServer) clientHandlerUpdate(w http.ResponseWriter, r *http.Request
 		w.Write([]byte("Expected non-empty request body"))
 		return
 	}
-	if s.node.getState() != Leader {
+	if s.node.State() != raft.Leader {
 		w.WriteHeader(422)
 		log.Printf("clientHandlerUpdate: non-leader node")
 		w.Write([]byte("Node is not a leader"))
@@ -69,33 +70,23 @@ func (s ClientServer) clientHandlerUpdate(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(500)
 		return
 	}
-	ur := updateRequest{
+	ur := raft.UpdateRequest{
 		cmdJson,
 		make(chan int),
 	}
 	select {
-	case s.node.stateUpdateRequestCh <- ur:
-		<-ur.commited
+	case s.node.StateUpdateRequestCh <- ur:
+		<-ur.Commited
 		w.WriteHeader(200)
 	case <-r.Context().Done():
 	}
 }
 
-func (s ClientServer) clientHandlerDelete(w http.ResponseWriter, r *http.Request) {
-	if s.node.getState() != Leader {
-		w.WriteHeader(422)
-		w.Write([]byte("Node is not a leader"))
-		log.Printf("clientHandlerUpdate: non-leader node")
-		return
-	}
-}
-
-func RunClientServer(addr string, node *Node, storage *storage.KVStorage) error {
+func RunClientServer(addr string, node *raft.Node, storage *storage.KVStorage) error {
 	kvServer := ClientServer{storage, node}
 	handler := http.NewServeMux()
 	handler.HandleFunc("GET /{key}", kvServer.clientHandlerGet)
 	handler.HandleFunc("POST /{key}", kvServer.clientHandlerUpdate)
-	handler.HandleFunc("DELETE /{key}", kvServer.clientHandlerDelete)
 	handler.HandleFunc("GET /raft", kvServer.clientHandlerRaft)
 	log.Printf("Running HTTP client server at %v", addr)
 	server := &http.Server{Addr: addr, Handler: handler}

@@ -1,16 +1,14 @@
-package raft
+package raft_test
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"raft/pkg/asserts"
-	"raft/storage"
+	"raft"
 	"testing"
 	"time"
+
+	. "raft"
+	"raft/pkg/asserts"
+	"raft/storage"
 )
 
 // TODO it sometimes blocks indefinitely
@@ -20,19 +18,11 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5011",
 		3: "localhost:5012",
 	}
-	nodeClientAddrs := map[NodeId]string{
-		1: "localhost:5510",
-		2: "localhost:5511",
-		3: "localhost:5512",
-	}
+
 	kv1 := storage.NewKVStorage()
 	kv2 := storage.NewKVStorage()
 	kv3 := storage.NewKVStorage()
-	kvs := map[NodeId]*storage.KVStorage{
-		1: kv1,
-		2: kv2,
-		3: kv3,
-	}
+
 	n1 := NewNode(1, nodes, kv1).LogPrefixId() //.Verbose()
 	n2 := NewNode(2, nodes, kv2).LogPrefixId() //.Verbose()
 	n3 := NewNode(3, nodes, kv3).LogPrefixId() //.Verbose()
@@ -44,59 +34,51 @@ func TestConsensys(t *testing.T) {
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
-	go RunClientServer(nodeClientAddrs[1], n1, kv1)
-	go RunClientServer(nodeClientAddrs[2], n2, kv1)
-	go RunClientServer(nodeClientAddrs[3], n3, kv1)
 	waitABit()
-	n1State := nodeState(t, nodeClientAddrs[1])
-	n2State := nodeState(t, nodeClientAddrs[2])
-	n3State := nodeState(t, nodeClientAddrs[3])
 	roles := map[State][]NodeId{
 		Leader:    {},
 		Follower:  {},
 		Candidate: {},
 	}
-	roles[n1State.State] = append(roles[n1State.State], 1)
-	roles[n2State.State] = append(roles[n2State.State], 2)
-	roles[n3State.State] = append(roles[n3State.State], 3)
+	roles[n1.State()] = append(roles[n1.State()], 1)
+	roles[n2.State()] = append(roles[n2.State()], 2)
+	roles[n3.State()] = append(roles[n3.State()], 3)
 	asserts.Len(t, 2, roles[Follower])
 	asserts.Len(t, 1, roles[Leader])
 	asserts.Len(t, 0, roles[Candidate])
-	firstTerm := n1State.Term
+	firstTerm := n1.CurrentTerm()
 	asserts.True(t, firstTerm > 0)
-	asserts.Equal(t, firstTerm, n2State.Term)
-	asserts.Equal(t, firstTerm, n3State.Term)
+	asserts.Equal(t, firstTerm, n2.CurrentTerm())
+	asserts.Equal(t, firstTerm, n3.CurrentTerm())
 
 	firstEverLeader := roles[Leader][0]
 	nodeStructs[firstEverLeader].Shutdown()
 	waitABit()
 
-	var newLeader *RaftState
-	var follower *RaftState
+	var newLeaderTerm int
+	var followerTerm int
 	for _, id := range roles[Follower] {
-		state := nodeState(t, nodeClientAddrs[id])
-		if state.State == Leader {
-			newLeader = &state
-		} else if state.State == Follower {
-			follower = &state
-		} else if state.State == Candidate {
+		node := nodeStructs[id]
+		if node.State() == Leader {
+			newLeaderTerm = node.CurrentTerm()
+		} else if node.State() == Follower {
+			followerTerm = node.CurrentTerm()
+		} else if node.State() == Candidate {
 			t.Log("expected two nodes to be Leader and Follower, but have Candidate")
 			t.Fail()
 		}
 	}
-	asserts.NotEqual(t, nil, newLeader)
-	asserts.NotEqual(t, nil, follower)
-	secondTerm := newLeader.Term
+	asserts.NotEqual(t, 0, newLeaderTerm)
+	asserts.NotEqual(t, 0, followerTerm)
+	secondTerm := newLeaderTerm
 	asserts.True(t, secondTerm > firstTerm)
-	asserts.Equal(t, secondTerm, follower.Term)
+	asserts.Equal(t, secondTerm, followerTerm)
 
 	leaderIsBack := nodeStructs[firstEverLeader]
 	go leaderIsBack.Run()
-	go RunClientServer(nodeClientAddrs[firstEverLeader], nodeStructs[firstEverLeader], kvs[firstEverLeader])
 	waitABit()
-	state := nodeState(t, nodeClientAddrs[firstEverLeader])
-	asserts.Equal(t, Follower, state.State)
-	asserts.Equal(t, secondTerm, state.Term)
+	asserts.Equal(t, Follower, nodeStructs[firstEverLeader].State())
+	asserts.Equal(t, secondTerm, nodeStructs[firstEverLeader].CurrentTerm())
 }
 
 func TestKeyValueReplication(t *testing.T) {
@@ -105,11 +87,7 @@ func TestKeyValueReplication(t *testing.T) {
 		2: "localhost:5021",
 		3: "localhost:5022",
 	}
-	nodeClientAddrs := map[NodeId]string{
-		1: "localhost:5530",
-		2: "localhost:5531",
-		3: "localhost:5532",
-	}
+
 	kv1 := storage.NewKVStorage()
 	kv2 := storage.NewKVStorage()
 	kv3 := storage.NewKVStorage()
@@ -121,24 +99,23 @@ func TestKeyValueReplication(t *testing.T) {
 	n1 := NewNode(1, nodes, kv1).LogPrefixId() //.Verbose()
 	n2 := NewNode(2, nodes, kv2).LogPrefixId() //.Verbose()
 	n3 := NewNode(3, nodes, kv3).LogPrefixId() //.Verbose()
+	nodeStructs := map[NodeId]*Node{
+		1: n1,
+		2: n2,
+		3: n3,
+	}
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
-	go RunClientServer(nodeClientAddrs[1], n1, kv1)
-	go RunClientServer(nodeClientAddrs[2], n2, kv2)
-	go RunClientServer(nodeClientAddrs[3], n3, kv3)
 	waitABit()
-	n1State := nodeState(t, nodeClientAddrs[1])
-	n2State := nodeState(t, nodeClientAddrs[2])
-	n3State := nodeState(t, nodeClientAddrs[3])
 	roles := map[State][]NodeId{
 		Leader:    {},
 		Follower:  {},
 		Candidate: {},
 	}
-	roles[n1State.State] = append(roles[n1State.State], 1)
-	roles[n2State.State] = append(roles[n2State.State], 2)
-	roles[n3State.State] = append(roles[n3State.State], 3)
+	roles[n1.State()] = append(roles[n1.State()], 1)
+	roles[n2.State()] = append(roles[n2.State()], 2)
+	roles[n3.State()] = append(roles[n3.State()], 3)
 	asserts.Len(t, 2, roles[Follower])
 	asserts.Len(t, 1, roles[Leader])
 	asserts.Len(t, 0, roles[Candidate])
@@ -146,81 +123,42 @@ func TestKeyValueReplication(t *testing.T) {
 	leader := roles[Leader][0]
 	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	sendSetRequest(t, timeout, nodeClientAddrs[leader], "x", []byte{'3'})
-	waitABit()
-	for _, addr := range nodeClientAddrs {
-		value, status := sendGetRequest(t, addr, "x")
-		asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
-		asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
+
+	ur := raft.UpdateRequest{
+		[]byte(`{"Action":0,"Key":"x","Value":"3"}`),
+		make(chan int),
+	}
+	select {
+	case nodeStructs[leader].StateUpdateRequestCh <- ur:
+		<-ur.Commited
+	case <-timeout.Done():
 	}
 
-	nodeStructs := map[NodeId]*Node{
-		1: n1,
-		2: n2,
-		3: n3,
+	waitABit()
+	for id := range nodes {
+		value, ok := kvs[id].Get("x")
+		asserts.True(t, ok)
+		asserts.Equal(t, "3", string(value))
 	}
+
 	nodeStructs[leader].Shutdown()
 	waitABit()
 	for _, id := range roles[Follower] {
-		addr := nodeClientAddrs[id]
-		value, status := sendGetRequest(t, addr, "x")
-		asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
-		asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
+		value, ok := kvs[id].Get("x")
+		asserts.True(t, ok)
+		asserts.Equal(t, "3", string(value))
 	}
 
 	leaderIsBack := nodeStructs[leader]
 	go leaderIsBack.Run()
-	go RunClientServer(nodeClientAddrs[leader], leaderIsBack, kvs[leader])
 	waitABit()
-	value, status := sendGetRequest(t, nodeClientAddrs[leader], "x")
-	asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", nodeClientAddrs[leader]), t, 200, status)
-	asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", nodeClientAddrs[leader]), t, "3", string(value))
-}
 
-func sendSetRequest(t *testing.T, ctx context.Context, addr string, key string, value []byte) {
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/%s", addr, key), bytes.NewBuffer(value))
-	if err != nil {
-		return
-	}
-	client := http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("sendSetRequest: %s", err.Error())
-	}
-	resp.Body.Close()
-	asserts.Equal(t, 200, resp.StatusCode)
-}
-
-func sendGetRequest(t *testing.T, addr string, key string) ([]byte, int) {
-	resp, err := http.Get("http://" + addr + "/" + key)
-	if err != nil {
-		t.Fatalf("sendGetRequest: %s", err.Error())
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	asserts.ErrNil(t, err)
-	return body, resp.StatusCode
+	value, ok := kvs[leader].Get("x")
+	asserts.True(t, ok)
+	asserts.Equal(t, "3", string(value))
 }
 
 // TODO listen to some kind of event maybe?
 func waitABit() {
 	time.Sleep(time.Second)
-}
-
-func nodeState(t *testing.T, addr string) RaftState {
-	resp, err := http.Get("http://" + addr + "/raft")
-	if err != nil {
-		t.Fatalf("/raft: %s", err.Error())
-	}
-	bodyjson, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %s", err.Error())
-	}
-	resp.Body.Close()
-	asserts.Equal(t, 200, resp.StatusCode)
-	var state RaftState
-	if err := json.Unmarshal(bodyjson, &state); err != nil {
-		t.Fatalf("unmarshal /raft: %s", err.Error())
-	}
-	return state
 }

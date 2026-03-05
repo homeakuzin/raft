@@ -5,30 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net/http"
-	"os"
-	"raft/storage"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var heartbeatPeriod = 50 * time.Millisecond
 var electionTimeout = 150 * time.Millisecond
 var electionTimeoutDelta = 150 * time.Millisecond
-
-var flagVerbose = flag.Bool("v", false, "enables verbose output")
 
 func generateElectionTimeout() time.Duration {
 	delta := time.Duration(rand.Int63n(int64(electionTimeoutDelta) * 2))
@@ -45,9 +34,9 @@ type appendEntriesRpcCall struct {
 	result chan AppendEntriesResult
 }
 
-type updateRequest struct {
-	cmd      []byte
-	commited chan int
+type UpdateRequest struct {
+	Cmd      []byte
+	Commited chan int
 }
 
 type Node struct {
@@ -72,19 +61,13 @@ type Node struct {
 	requestVoteRpc       chan requestVoteRpcCall
 	appendEntriesRpc     chan appendEntriesRpcCall
 	commitCh             chan int
-	stateUpdateRequestCh chan updateRequest
+	StateUpdateRequestCh chan UpdateRequest
 	logger               *log.Logger
 }
 
 func (n *Node) Verbose() *Node {
 	n.verbose = true
 	return n
-}
-
-func (n *Node) getCurrentTerm() int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.currentTerm
 }
 
 func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
@@ -97,7 +80,7 @@ func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
 	return &Node{Id: id,
 		nodes:                nodes,
 		stateMachine:         NewStateMachine(storage),
-		stateUpdateRequestCh: make(chan updateRequest),
+		StateUpdateRequestCh: make(chan UpdateRequest),
 		shutdown:             make(chan struct{}),
 		otherNodeIds:         otherNodeIds,
 		requestVoteRpc:       make(chan requestVoteRpcCall),
@@ -113,6 +96,18 @@ func (n *Node) LogPrefixId() *Node {
 	return n
 }
 
+func (n *Node) CurrentTerm() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.currentTerm
+}
+
+func (n *Node) State() State {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.state
+}
+
 func (n *Node) incrementTerm() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -124,12 +119,6 @@ func (n *Node) setCurrentTerm(term int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.currentTerm = term
-}
-
-func (n *Node) getState() State {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.state
 }
 
 func (n *Node) setState(s State) State {
@@ -226,7 +215,7 @@ func (n *Node) eventLoop() {
 			// 4. Append any new entries not already in the log
 			// TODO 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 			response := AppendEntriesResult{}
-			if appendEntries.data.Term >= n.getCurrentTerm() {
+			if appendEntries.data.Term >= n.CurrentTerm() {
 				n.setCurrentTerm(appendEntries.data.Term)
 				n.becomeFollower()
 				response.Success = true
@@ -255,7 +244,7 @@ func (n *Node) eventLoop() {
 					n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 				}
 			}
-			response.Term = n.getCurrentTerm()
+			response.Term = n.CurrentTerm()
 			appendEntries.result <- response
 		case requestVote := <-n.requestVoteRpc:
 			// Receiver implementation:
@@ -265,13 +254,13 @@ func (n *Node) eventLoop() {
 			response := RequestVoteResult{}
 			lastLog, lastIndex, ok := n.stateMachine.Last()
 			candidateUpToDate := !ok || lastIndex >= requestVote.data.LastLogIndex && lastLog.Term >= requestVote.data.LastLogTerm
-			if requestVote.data.Term > n.getCurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
+			if requestVote.data.Term > n.CurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
 				n.setCurrentTerm(requestVote.data.Term)
 				n.becomeFollower()
 				n.setVotedFor(requestVote.data.CandidateId)
 				response.VoteGranted = true
 			}
-			response.Term = n.getCurrentTerm()
+			response.Term = n.CurrentTerm()
 			requestVote.result <- response
 		case <-n.electionTimer.C:
 			n.becomeCandidate()
@@ -288,11 +277,11 @@ func (n *Node) eventLoop() {
 				}()
 			}
 		case response := <-requestVoteResponse:
-			if state := n.getState(); state != Candidate {
+			if state := n.State(); state != Candidate {
 				n.logger.Printf("Warning: got RequestVoteRPCResult in state %s", state)
 				break
 			}
-			if response.Term > n.getCurrentTerm() {
+			if response.Term > n.CurrentTerm() {
 				n.setCurrentTerm(response.Term)
 				n.becomeFollower()
 				break
@@ -306,7 +295,7 @@ func (n *Node) eventLoop() {
 			}
 
 		case <-n.heartbeatTimer.C:
-			if state := n.getState(); state != Leader {
+			if state := n.State(); state != Leader {
 				n.logger.Printf("Warning: got heartbeatTimer tick in state %s", state)
 				break
 			}
@@ -323,20 +312,20 @@ func (n *Node) eventLoop() {
 				}()
 			}
 		case heartbeat := <-heartbeatResponse:
-			if state := n.getState(); state != Leader {
+			if state := n.State(); state != Leader {
 				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
 				break
 			}
-			if heartbeat.Term > n.getCurrentTerm() {
+			if heartbeat.Term > n.CurrentTerm() {
 				n.setCurrentTerm(heartbeat.Term)
 				n.becomeFollower()
 			}
 		case appendEntriesResult := <-appendEntriesResponse:
-			if state := n.getState(); state != Leader {
+			if state := n.State(); state != Leader {
 				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
 				break
 			}
-			if appendEntriesResult.result.Term > n.getCurrentTerm() {
+			if appendEntriesResult.result.Term > n.CurrentTerm() {
 				n.setCurrentTerm(appendEntriesResult.result.Term)
 				n.becomeFollower()
 				break
@@ -374,9 +363,9 @@ func (n *Node) eventLoop() {
 					}
 				}()
 			}
-		case req := <-n.stateUpdateRequestCh:
-			n.logger.Printf("Incoming request: %s", req.cmd)
-			n.stateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
+		case req := <-n.StateUpdateRequestCh:
+			n.logger.Printf("Incoming request: %s", req.Cmd)
+			n.stateMachine.AppendLogs(Entry{req.Cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				nodeHost := n.nodes[id]
 				go func() {
@@ -385,13 +374,13 @@ func (n *Node) eventLoop() {
 					if err != nil {
 						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.commited, id}
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.Commited, id}
 					}
 				}()
 			}
 		}
 
-		switch n.getState() {
+		switch n.State() {
 		case Follower:
 			n.electionTimer.Reset(generateElectionTimeout())
 		case Candidate:
@@ -416,7 +405,7 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 		}
 	}
 	return AppendEntries{
-		Term:         n.getCurrentTerm(),
+		Term:         n.CurrentTerm(),
 		LeaderId:     n.Id,
 		LeaderCommit: n.stateMachine.CommitIndex(),
 		Entries:      entries,
@@ -463,7 +452,7 @@ func (n *Node) report() {
 
 func (n *Node) issueRequestVote(ctx context.Context, host string) (result RequestVoteResult, err error) {
 	requestVote := RequestVote{
-		Term:        n.getCurrentTerm(),
+		Term:        n.CurrentTerm(),
 		CandidateId: n.Id,
 	}
 	body, err := json.Marshal(&requestVote)
@@ -601,71 +590,4 @@ func (n *Node) dlog(format string, v ...any) {
 	if n.verbose {
 		n.logger.Printf(format, v...)
 	}
-}
-
-func main() {
-	log.SetFlags(log.Lmicroseconds)
-	log.SetOutput(os.Stdout)
-
-	flagNodes := flag.String("nodes", "", "id:host:port joined by semicolon. Example:\n\t0:0.0.0.1:1234;1:0.0.0.2:2345;2:0.0.0.3:3456")
-	flagNodeId := flag.Int("id", int(EmptyId), "Current node ID")
-	flagClientAddr := flag.String("clientaddr", "", "Address to serve HTTP clients")
-	flagMetricsAddr := flag.String("metricsaddr", "", "Address to serve prometheus metrics")
-	flagReport := flag.Bool("report", false, "Whether to report node state every second")
-	flag.Parse()
-
-	nodeId := NodeId(*flagNodeId)
-	log.SetPrefix(fmt.Sprintf("[%s] ", nodeId))
-
-	nodes := make(map[NodeId]string)
-	nodeParts := strings.Split(*flagNodes, ";")
-	for i := range nodeParts {
-		idHostAndPort := strings.Split(nodeParts[i], ":")
-		if len(idHostAndPort) != 3 {
-			flag.Usage()
-			log.Fatal("Incorrect -nodes usage")
-		}
-		nodeIdInt, err := strconv.Atoi(idHostAndPort[0])
-		if err != nil {
-			log.Fatal("Incorrect -nodes usage")
-		}
-		nodes[NodeId(nodeIdInt)] = idHostAndPort[1] + ":" + idHostAndPort[2]
-	}
-
-	if len(nodes) < 3 {
-		log.Fatalf("We work with 3 nodes minimum")
-	}
-
-	if _, ok := nodes[NodeId(*flagNodeId)]; !ok {
-		log.Fatalf("No node with id %d", *flagNodeId)
-	}
-
-	if *flagMetricsAddr != "" {
-		reg := prometheus.NewRegistry()
-		reg.MustRegister(
-			collectors.NewGoCollector(),
-			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		)
-		// TODO broadcastTime/electionTimeout/MTBF metrics
-		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-		log.Printf("exposing prometheus metrics at %s", *flagMetricsAddr)
-		go http.ListenAndServe(*flagMetricsAddr, nil)
-	}
-
-	kvStorage := storage.NewKVStorage()
-	node := NewNode(nodeId, nodes, kvStorage)
-	if *flagVerbose {
-		node.Verbose()
-	}
-	if *flagReport {
-		node.StartReporting()
-	}
-	if *flagClientAddr != "" {
-		go func() {
-			if err := RunClientServer(*flagClientAddr, node, kvStorage); err != nil {
-				log.Printf("Could not run client HTTP server: %s", err.Error())
-			}
-		}()
-	}
-	node.Run()
 }
