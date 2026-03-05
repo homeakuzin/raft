@@ -50,25 +50,24 @@ type updateRequest struct {
 }
 
 type Node struct {
-	mu                   sync.Mutex
-	Id                   NodeId
-	votedFor             NodeId
-	votesHave            int
-	currentTerm          int
-	state                State
-	electionTimer        *time.Timer
-	heartbeatTimer       *time.Timer
-	shutdown             chan struct{}
-	nodes                map[NodeId]string
-	otherNodeIds         []NodeId
-	nextIndex            map[NodeId]int
-	matchIndex           map[NodeId]int
-	stateMachine         *StateMachine
-	httpServer           *http.Server
-	clientServer         *http.Server
-	reportTick           *time.Ticker
-	verbose              bool
-	clientServerAddr     string
+	mu             sync.Mutex
+	Id             NodeId
+	votedFor       NodeId
+	votesHave      int
+	currentTerm    int
+	state          State
+	electionTimer  *time.Timer
+	heartbeatTimer *time.Timer
+	shutdown       chan struct{}
+	nodes          map[NodeId]string
+	otherNodeIds   []NodeId
+	nextIndex      map[NodeId]int
+	matchIndex     map[NodeId]int
+	stateMachine   *StateMachine
+	httpServer     *http.Server
+	reportTick     *time.Ticker
+	verbose        bool
+	string
 	requestVoteRpc       chan requestVoteRpcCall
 	appendEntriesRpc     chan appendEntriesRpcCall
 	commitCh             chan int
@@ -169,9 +168,6 @@ func (n *Node) Shutdown() {
 	n.shutdown <- struct{}{}
 	if err := n.httpServer.Shutdown(context.Background()); err != nil {
 		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
-	}
-	if err := n.clientServer.Shutdown(context.Background()); err != nil {
-		n.logger.Printf("could not shutdown client HTTP server: %s", err.Error())
 	}
 	if n.reportTick != nil {
 		n.reportTick.Stop()
@@ -665,7 +661,7 @@ func main() {
 	}
 	if *flagClientAddr != "" {
 		go func() {
-			if err := node.RunClientServer(*flagClientAddr); err != nil {
+			if err := RunClientServer(*flagClientAddr, node, kvStorage); err != nil {
 				log.Printf("Could not run client HTTP server: %s", err.Error())
 			}
 		}()

@@ -24,9 +24,17 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5511",
 		3: "localhost:5512",
 	}
-	n1 := NewNode(1, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	kv1 := &KVStorage{state: map[string]string{}}
+	kv2 := &KVStorage{state: map[string]string{}}
+	kv3 := &KVStorage{state: map[string]string{}}
+	kvs := map[NodeId]*KVStorage{
+		1: kv1,
+		2: kv2,
+		3: kv3,
+	}
+	n1 := NewNode(1, nodes, kv1).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes, kv2).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes, kv3).LogPrefixId() //.Verbose()
 	nodeStructs := map[NodeId]*Node{
 		1: n1,
 		2: n2,
@@ -35,9 +43,9 @@ func TestConsensys(t *testing.T) {
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
-	go n1.RunClientServer(nodeClientAddrs[1])
-	go n2.RunClientServer(nodeClientAddrs[2])
-	go n3.RunClientServer(nodeClientAddrs[3])
+	go RunClientServer(nodeClientAddrs[1], n1, kv1)
+	go RunClientServer(nodeClientAddrs[2], n2, kv1)
+	go RunClientServer(nodeClientAddrs[3], n3, kv1)
 	waitABit()
 	n1State := nodeState(t, nodeClientAddrs[1])
 	n2State := nodeState(t, nodeClientAddrs[2])
@@ -83,7 +91,7 @@ func TestConsensys(t *testing.T) {
 
 	leaderIsBack := nodeStructs[firstEverLeader]
 	go leaderIsBack.Run()
-	go leaderIsBack.RunClientServer(nodeClientAddrs[firstEverLeader])
+	go RunClientServer(nodeClientAddrs[firstEverLeader], nodeStructs[firstEverLeader], kvs[firstEverLeader])
 	waitABit()
 	state := nodeState(t, nodeClientAddrs[firstEverLeader])
 	asserts.Equal(t, Follower, state.State)
@@ -101,15 +109,23 @@ func TestKeyValueReplication(t *testing.T) {
 		2: "localhost:5531",
 		3: "localhost:5532",
 	}
-	n1 := NewNode(1, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	kv1 := &KVStorage{state: map[string]string{}}
+	kv2 := &KVStorage{state: map[string]string{}}
+	kv3 := &KVStorage{state: map[string]string{}}
+	kvs := map[NodeId]*KVStorage{
+		1: kv1,
+		2: kv2,
+		3: kv3,
+	}
+	n1 := NewNode(1, nodes, kv1).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes, kv2).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes, kv3).LogPrefixId() //.Verbose()
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
-	go n1.RunClientServer(nodeClientAddrs[1])
-	go n2.RunClientServer(nodeClientAddrs[2])
-	go n3.RunClientServer(nodeClientAddrs[3])
+	go RunClientServer(nodeClientAddrs[1], n1, kv1)
+	go RunClientServer(nodeClientAddrs[2], n2, kv2)
+	go RunClientServer(nodeClientAddrs[3], n3, kv3)
 	waitABit()
 	n1State := nodeState(t, nodeClientAddrs[1])
 	n2State := nodeState(t, nodeClientAddrs[2])
@@ -153,7 +169,7 @@ func TestKeyValueReplication(t *testing.T) {
 
 	leaderIsBack := nodeStructs[leader]
 	go leaderIsBack.Run()
-	go leaderIsBack.RunClientServer(nodeClientAddrs[leader])
+	go RunClientServer(nodeClientAddrs[leader], leaderIsBack, kvs[leader])
 	waitABit()
 	value, status := sendGetRequest(t, nodeClientAddrs[leader], "x")
 	asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", nodeClientAddrs[leader]), t, 200, status)
