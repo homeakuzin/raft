@@ -24,9 +24,9 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5511",
 		3: "localhost:5512",
 	}
-	n1 := NewNode(1, nodes) //.Verbose()
-	n2 := NewNode(2, nodes) //.Verbose()
-	n3 := NewNode(3, nodes) //.Verbose()
+	n1 := NewNode(1, nodes).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes).LogPrefixId() //.Verbose()
 	nodeStructs := map[NodeId]*Node{
 		1: n1,
 		2: n2,
@@ -38,9 +38,6 @@ func TestConsensys(t *testing.T) {
 	go n1.RunClientServer(nodeClientAddrs[1])
 	go n2.RunClientServer(nodeClientAddrs[2])
 	go n3.RunClientServer(nodeClientAddrs[3])
-	defer n1.Shutdown()
-	defer n2.Shutdown()
-	defer n3.Shutdown()
 	waitABit()
 	n1State := nodeState(t, nodeClientAddrs[1])
 	n2State := nodeState(t, nodeClientAddrs[2])
@@ -62,9 +59,7 @@ func TestConsensys(t *testing.T) {
 	asserts.Equal(t, firstTerm, n3State.Term)
 
 	firstEverLeader := roles[Leader][0]
-	t.Log("shutting down first leader")
 	nodeStructs[firstEverLeader].Shutdown()
-	t.Log("shut down first leader")
 	waitABit()
 
 	var newLeader *RaftState
@@ -86,7 +81,6 @@ func TestConsensys(t *testing.T) {
 	asserts.True(t, secondTerm > firstTerm)
 	asserts.Equal(t, secondTerm, follower.Term)
 
-	t.Logf("leader returns: %s", firstEverLeader)
 	leaderIsBack := nodeStructs[firstEverLeader]
 	go leaderIsBack.Run()
 	go leaderIsBack.RunClientServer(nodeClientAddrs[firstEverLeader])
@@ -98,27 +92,24 @@ func TestConsensys(t *testing.T) {
 
 func TestKeyValueReplication(t *testing.T) {
 	nodes := map[NodeId]string{
-		1: "localhost:5010",
-		2: "localhost:5011",
-		3: "localhost:5012",
+		1: "localhost:5020",
+		2: "localhost:5021",
+		3: "localhost:5022",
 	}
 	nodeClientAddrs := map[NodeId]string{
-		1: "localhost:5510",
-		2: "localhost:5511",
-		3: "localhost:5512",
+		1: "localhost:5530",
+		2: "localhost:5531",
+		3: "localhost:5532",
 	}
-	n1 := NewNode(1, nodes) //.Verbose()
-	n2 := NewNode(2, nodes) //.Verbose()
-	n3 := NewNode(3, nodes) //.Verbose()
+	n1 := NewNode(1, nodes).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes).LogPrefixId() //.Verbose()
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
 	go n1.RunClientServer(nodeClientAddrs[1])
 	go n2.RunClientServer(nodeClientAddrs[2])
 	go n3.RunClientServer(nodeClientAddrs[3])
-	defer n1.Shutdown()
-	defer n2.Shutdown()
-	defer n3.Shutdown()
 	waitABit()
 	n1State := nodeState(t, nodeClientAddrs[1])
 	n2State := nodeState(t, nodeClientAddrs[2])
@@ -134,21 +125,39 @@ func TestKeyValueReplication(t *testing.T) {
 	asserts.Len(t, 2, roles[Follower])
 	asserts.Len(t, 1, roles[Leader])
 	asserts.Len(t, 0, roles[Candidate])
-	firstTerm := n1State.Term
-	asserts.True(t, firstTerm > 0)
-	asserts.Equal(t, firstTerm, n2State.Term)
-	asserts.Equal(t, firstTerm, n3State.Term)
 
 	leader := roles[Leader][0]
 	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	sendSetRequest(t, timeout, nodeClientAddrs[leader], "x", []byte{'3'})
-	// waitABit()
-	// for _, addr := range nodeClientAddrs {
-	// 	value, status := sendGetRequest(t, addr, "x")
-	// 	asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
-	// 	asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
-	// }
+	waitABit()
+	for _, addr := range nodeClientAddrs {
+		value, status := sendGetRequest(t, addr, "x")
+		asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
+		asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
+	}
+
+	nodeStructs := map[NodeId]*Node{
+		1: n1,
+		2: n2,
+		3: n3,
+	}
+	nodeStructs[leader].Shutdown()
+	waitABit()
+	for _, id := range roles[Follower] {
+		addr := nodeClientAddrs[id]
+		value, status := sendGetRequest(t, addr, "x")
+		asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
+		asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
+	}
+
+	leaderIsBack := nodeStructs[leader]
+	go leaderIsBack.Run()
+	go leaderIsBack.RunClientServer(nodeClientAddrs[leader])
+	waitABit()
+	value, status := sendGetRequest(t, nodeClientAddrs[leader], "x")
+	asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", nodeClientAddrs[leader]), t, 200, status)
+	asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", nodeClientAddrs[leader]), t, "3", string(value))
 }
 
 func sendSetRequest(t *testing.T, ctx context.Context, addr string, key string, value []byte) {

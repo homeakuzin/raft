@@ -73,6 +73,7 @@ type Node struct {
 	appendEntriesRpc     chan appendEntriesRpcCall
 	commitCh             chan int
 	stateUpdateRequestCh chan updateRequest
+	logger               *log.Logger
 }
 
 func (n *Node) Verbose() *Node {
@@ -103,7 +104,13 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 		appendEntriesRpc:     make(chan appendEntriesRpcCall),
 		nextIndex:            make(map[NodeId]int),
 		matchIndex:           make(map[NodeId]int),
+		logger:               log.Default(),
 	}
+}
+
+func (n *Node) LogPrefixId() *Node {
+	n.logger.SetPrefix(fmt.Sprintf("[%s] ", n.Id))
+	return n
 }
 
 func (n *Node) incrementTerm() int {
@@ -161,10 +168,10 @@ func (n *Node) setVotesHave(value int) {
 func (n *Node) Shutdown() {
 	n.shutdown <- struct{}{}
 	if err := n.httpServer.Shutdown(context.Background()); err != nil {
-		log.Printf("could not shutdown HTTP server: %s", err.Error())
+		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
 	if err := n.clientServer.Shutdown(context.Background()); err != nil {
-		log.Printf("could not shutdown client HTTP server: %s", err.Error())
+		n.logger.Printf("could not shutdown client HTTP server: %s", err.Error())
 	}
 	if n.reportTick != nil {
 		n.reportTick.Stop()
@@ -224,7 +231,7 @@ func (n *Node) eventLoop() {
 			if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
 				n.StateMachine.Apply(appendEntries.data.LeaderCommit)
 				n.StateMachine.SetCommitIndex(appendEntries.data.LeaderCommit)
-				log.Printf("Applied commit index %d", appendEntries.data.LeaderCommit)
+				n.logger.Printf("Applied commit index %d", appendEntries.data.LeaderCommit)
 			}
 			if len(appendEntries.data.Entries) > 0 {
 				if appendEntries.data.PrevLogIndex > 0 {
@@ -233,7 +240,7 @@ func (n *Node) eventLoop() {
 						if lastEntry.Term == appendEntries.data.PrevLogTerm {
 							response.Success = true
 							n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-							log.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
+							n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 						} else {
 							n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
 						}
@@ -241,7 +248,7 @@ func (n *Node) eventLoop() {
 				} else {
 					response.Success = true
 					n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-					log.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
+					n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 				}
 			}
 			response.Term = n.getCurrentTerm()
@@ -273,7 +280,7 @@ func (n *Node) eventLoop() {
 			}
 		case response := <-requestVoteResponse:
 			if state := n.getState(); state != Candidate {
-				log.Printf("Warning: got RequestVoteRPCResult in state %s", state)
+				n.logger.Printf("Warning: got RequestVoteRPCResult in state %s", state)
 				break
 			}
 			if response.Term > n.getCurrentTerm() {
@@ -291,7 +298,7 @@ func (n *Node) eventLoop() {
 
 		case <-n.heartbeatTimer.C:
 			if state := n.getState(); state != Leader {
-				log.Printf("Warning: got heartbeatTimer tick in state %s", state)
+				n.logger.Printf("Warning: got heartbeatTimer tick in state %s", state)
 				break
 			}
 			appendEntriesCtx := context.Background()
@@ -308,7 +315,7 @@ func (n *Node) eventLoop() {
 			}
 		case heartbeat := <-heartbeatResponse:
 			if state := n.getState(); state != Leader {
-				log.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
+				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
 				break
 			}
 			if heartbeat.Term > n.getCurrentTerm() {
@@ -317,7 +324,7 @@ func (n *Node) eventLoop() {
 			}
 		case appendEntriesResult := <-appendEntriesResponse:
 			if state := n.getState(); state != Leader {
-				log.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
+				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
 				break
 			}
 			if appendEntriesResult.result.Term > n.getCurrentTerm() {
@@ -326,7 +333,7 @@ func (n *Node) eventLoop() {
 				break
 			}
 			if appendEntriesResult.result.Success {
-				log.Printf("Agreed with %s", appendEntriesResult.id)
+				n.logger.Printf("Agreed with %s", appendEntriesResult.id)
 				n.nextIndex[appendEntriesResult.id] += len(appendEntriesResult.request.Entries)
 				n.matchIndex[appendEntriesResult.id] = n.nextIndex[appendEntriesResult.id] - 1
 				matchCount := 1
@@ -338,7 +345,7 @@ func (n *Node) eventLoop() {
 				}
 				if matchCount*2 > len(n.otherNodeIds)+1 {
 					commitIndex += len(appendEntriesResult.request.Entries)
-					log.Printf("set CommitIndex = %d", commitIndex)
+					n.logger.Printf("set CommitIndex = %d", commitIndex)
 					n.StateMachine.SetCommitIndex(commitIndex)
 					n.StateMachine.Apply(commitIndex)
 					appendEntriesResult.client <- 200
@@ -352,14 +359,14 @@ func (n *Node) eventLoop() {
 					appendEntries := n.makeAppendEntries(appendEntriesResult.id)
 					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
 					if err != nil {
-						log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 					} else {
 						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}
 					}
 				}()
 			}
 		case req := <-n.stateUpdateRequestCh:
-			log.Printf("Incoming request: %s", req.cmd)
+			n.logger.Printf("Incoming request: %s", req.cmd)
 			n.StateMachine.AppendLogs(Entry{req.cmd, n.getCurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				nodeHost := n.nodes[id]
@@ -367,7 +374,7 @@ func (n *Node) eventLoop() {
 					appendEntries := n.makeAppendEntries(id)
 					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
 					if err != nil {
-						log.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 					} else {
 						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.response, id}
 					}
@@ -411,17 +418,17 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 
 func (n *Node) becomeCandidate() {
 	if n.setState(Candidate) != Candidate {
-		log.Printf("Turning to a Candidate")
+		n.logger.Printf("Turning to a Candidate")
 	}
 	term := n.incrementTerm()
 	n.setVotedFor(n.Id)
 	n.setVotesHave(1)
-	log.Printf("Term %d: election", term)
+	n.logger.Printf("Term %d: election", term)
 }
 
 func (n *Node) becomeFollower() {
 	if n.setState(Follower) != Follower {
-		log.Printf("Turning to a Follower")
+		n.logger.Printf("Turning to a Follower")
 	}
 	n.ElectionTimer.Reset(generateElectionTimeout())
 	n.heartbeatTimer.Stop()
@@ -429,7 +436,7 @@ func (n *Node) becomeFollower() {
 
 func (n *Node) becomeLeader() {
 	if n.setState(Leader) != Leader {
-		log.Printf("Turning to a Leader")
+		n.logger.Printf("Turning to a Leader")
 	}
 	for _, id := range n.otherNodeIds {
 		n.nextIndex[id] = n.StateMachine.LastApplied() + 1
@@ -441,7 +448,7 @@ func (n *Node) becomeLeader() {
 
 func (n *Node) report() {
 	n.mu.Lock()
-	log.Printf("State => %s. Term => %d.", n.State, n.CurrentTerm)
+	n.logger.Printf("State => %s. Term => %d.", n.State, n.CurrentTerm)
 	n.mu.Unlock()
 }
 
@@ -512,13 +519,13 @@ func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(50 * time.Millisecond)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("could not read body: %s", err.Error())
+		n.logger.Printf("could not read body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	var requestVote RequestVote
 	if err := json.Unmarshal(body, &requestVote); err != nil {
-		log.Printf("invalid body: %s", err.Error())
+		n.logger.Printf("invalid body: %s", err.Error())
 		w.WriteHeader(400)
 		return
 	}
@@ -527,12 +534,12 @@ func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 	response := <-responseCh
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
-		log.Printf("could not serialize response body: %s", err.Error())
+		n.logger.Printf("could not serialize response body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	if _, err := w.Write(responseBody); err != nil {
-		log.Printf("could not write response body: %s", err.Error())
+		n.logger.Printf("could not write response body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
@@ -541,13 +548,13 @@ func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
 func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("could not read body: %s", err.Error())
+		n.logger.Printf("could not read body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	var appendEntries AppendEntries
 	if err := json.Unmarshal(body, &appendEntries); err != nil {
-		log.Printf("invalid body: %s", err.Error())
+		n.logger.Printf("invalid body: %s", err.Error())
 		w.WriteHeader(400)
 		return
 	}
@@ -556,12 +563,12 @@ func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
 	response := <-responseCh
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
-		log.Printf("could not serialize response body: %s", err.Error())
+		n.logger.Printf("could not serialize response body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	if _, err := w.Write(responseBody); err != nil {
-		log.Printf("could not write response body: %s", err.Error())
+		n.logger.Printf("could not write response body: %s", err.Error())
 		w.WriteHeader(500)
 		return
 	}
@@ -572,7 +579,7 @@ func (n *Node) runServer() error {
 	handler.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
 	handler.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
 	host := n.nodes[n.Id]
-	log.Printf("Running HTTP server at %v", host)
+	n.logger.Printf("Running HTTP server at %v", host)
 	n.httpServer = &http.Server{Addr: host, Handler: handler}
 	err := n.httpServer.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
@@ -583,7 +590,7 @@ func (n *Node) runServer() error {
 
 func (n *Node) dlog(format string, v ...any) {
 	if n.verbose {
-		log.Printf(format, v...)
+		n.logger.Printf(format, v...)
 	}
 }
 
