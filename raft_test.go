@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"hyperraft/pkg/asserts"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"time"
 )
 
+// TODO it sometimes blocks indefinitely
 func TestConsensys(t *testing.T) {
 	nodes := map[NodeId]string{
 		1: "localhost:5010",
@@ -98,53 +101,109 @@ func TestSingleNode(t *testing.T) {
 		1: "localhost:5015",
 	}
 	node := NewNode(1, nodes)
+	defer node.Shutdown()
 	go node.Run()
 	go node.RunClientServer("localhost:5016")
 	waitABit()
 	state := nodeState(t, "localhost:5016")
 	asserts.Equal(t, Leader, state.State)
-	node.Shutdown()
 }
 
-// func TestLogReplication(t *testing.T) {
-// 	nodes := map[NodeId]string{
-// 		1: "localhost:6010",
-// 		2: "localhost:6011",
-// 		3: "localhost:6012",
-// 	}
-// 	nodeClientAddrs := map[NodeId]string{
-// 		1: "localhost:6510",
-// 		2: "localhost:6511",
-// 		3: "localhost:6512",
-// 	}
-// 	n1 := NewNode(1, nodes)
-// 	n2 := NewNode(2, nodes)
-// 	n3 := NewNode(3, nodes)
-// 	go n1.Run()
-// 	go n2.Run()
-// 	go n3.Run()
-// 	go n1.RunClientServer(nodeClientAddrs[1])
-// 	go n2.RunClientServer(nodeClientAddrs[2])
-// 	go n3.RunClientServer(nodeClientAddrs[3])
-// 	waitABit()
-// 	var leaderId NodeId
-// 	for id := range nodes {
-// 		state := nodeState(t, nodeClientAddrs[id])
-// 		if state.State == Leader {
-// 			leaderId = id
-// 			break
-// 		}
-// 	}
-// 	sendSetRequest(t, nodeClientAddrs[leaderId], "x", []byte("1"))
-// }
+func TestKeyValueSingleNode(t *testing.T) {
+	// nodes := map[NodeId]string{
+	// 	1: "localhost:5015",
+	// }
+	// node := NewNode(1, nodes)
+	// defer node.Shutdown()
+	// go node.Run()
+	// go node.RunClientServer("localhost:5016")
+	// waitABit()
+	// value, status := sendGetRequest(t, "localhost:5016", "x")
+	// asserts.Equal(t, 404, status)
+	// sendSetRequest(t, "localhost:5016", "x", []byte{'3'})
+	// value, status = sendGetRequest(t, "localhost:5016", "x")
+	// asserts.Equal(t, 200, status)
+	// asserts.Equal(t, "3", string(value))
+}
 
-func sendSetRequest(t *testing.T, addr string, key string, value []byte) {
-	resp, err := http.Post("http://"+addr+"/"+key, "text/plain", bytes.NewBuffer(value))
+func TestKeyValueReplication(t *testing.T) {
+	nodes := map[NodeId]string{
+		1: "localhost:5010",
+		2: "localhost:5011",
+		3: "localhost:5012",
+	}
+	nodeClientAddrs := map[NodeId]string{
+		1: "localhost:5510",
+		2: "localhost:5511",
+		3: "localhost:5512",
+	}
+	n1 := NewNode(1, nodes) //.Verbose()
+	n2 := NewNode(2, nodes) //.Verbose()
+	n3 := NewNode(3, nodes) //.Verbose()
+	go n1.Run()
+	go n2.Run()
+	go n3.Run()
+	go n1.RunClientServer(nodeClientAddrs[1])
+	go n2.RunClientServer(nodeClientAddrs[2])
+	go n3.RunClientServer(nodeClientAddrs[3])
+	defer n1.Shutdown()
+	defer n2.Shutdown()
+	defer n3.Shutdown()
+	waitABit()
+	n1State := nodeState(t, nodeClientAddrs[1])
+	n2State := nodeState(t, nodeClientAddrs[2])
+	n3State := nodeState(t, nodeClientAddrs[3])
+	roles := map[State][]NodeId{
+		Leader:    {},
+		Follower:  {},
+		Candidate: {},
+	}
+	roles[n1State.State] = append(roles[n1State.State], 1)
+	roles[n2State.State] = append(roles[n2State.State], 2)
+	roles[n3State.State] = append(roles[n3State.State], 3)
+	asserts.Len(t, 2, roles[Follower])
+	asserts.Len(t, 1, roles[Leader])
+	asserts.Len(t, 0, roles[Candidate])
+	firstTerm := n1State.Term
+	asserts.True(t, firstTerm > 0)
+	asserts.Equal(t, firstTerm, n2State.Term)
+	asserts.Equal(t, firstTerm, n3State.Term)
+
+	leader := roles[Leader][0]
+	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	sendSetRequest(t, timeout, nodeClientAddrs[leader], "x", []byte{'3'})
+	// waitABit()
+	// for _, addr := range nodeClientAddrs {
+	// 	value, status := sendGetRequest(t, addr, "x")
+	// 	asserts.EqualEx(fmt.Sprintf("expected status 200 for node %s", addr), t, 200, status)
+	// 	asserts.EqualEx(fmt.Sprintf("expected x=3 for node %s", addr), t, "3", string(value))
+	// }
+}
+
+func sendSetRequest(t *testing.T, ctx context.Context, addr string, key string, value []byte) {
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/%s", addr, key), bytes.NewBuffer(value))
+	if err != nil {
+		return
+	}
+	client := http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("sendSetRequest: %s", err.Error())
 	}
 	resp.Body.Close()
 	asserts.Equal(t, 200, resp.StatusCode)
+}
+
+func sendGetRequest(t *testing.T, addr string, key string) ([]byte, int) {
+	resp, err := http.Get("http://" + addr + "/" + key)
+	if err != nil {
+		t.Fatalf("sendGetRequest: %s", err.Error())
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	asserts.ErrNil(t, err)
+	return body, resp.StatusCode
 }
 
 // TODO listen to some kind of event maybe?

@@ -77,6 +77,13 @@ func NotEqual[T comparable](t testing.TB, expected, actual T) {
 	}
 }
 
+func EqualEx[T comparable](message string, t testing.TB, expected, actual T) {
+	t.Helper()
+	if expected != actual {
+		t.Fatalf("%s. Actual => `%v`", message, actual)
+	}
+}
+
 func Equal[T comparable](t testing.TB, expected, actual T) {
 	t.Helper()
 	if expected != actual {

@@ -24,9 +24,13 @@ func (n *Node) clientHandlerRaft(w http.ResponseWriter, r *http.Request) {
 	w.Write(stateBytes)
 }
 
-type updateRequest struct {
-	cmd      Command
-	response chan int
+func (n *Node) clientHandlerGet(w http.ResponseWriter, r *http.Request) {
+	value, ok := n.StateMachine.Get(r.PathValue("key"))
+	if ok {
+		w.Write(value)
+	} else {
+		w.WriteHeader(404)
+	}
 }
 
 func (n *Node) clientHandlerUpdate(w http.ResponseWriter, r *http.Request) {
@@ -38,11 +42,13 @@ func (n *Node) clientHandlerUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(value) == 0 {
 		w.WriteHeader(400)
+		log.Printf("clientHandlerUpdate: got empty request body")
 		w.Write([]byte("Expected non-empty request body"))
 		return
 	}
 	if n.getState() != Leader {
 		w.WriteHeader(422)
+		log.Printf("clientHandlerUpdate: non-leader node")
 		w.Write([]byte("Node is not a leader"))
 		return
 	}
@@ -55,10 +61,13 @@ func (n *Node) clientHandlerUpdate(w http.ResponseWriter, r *http.Request) {
 		make(chan int),
 	}
 	n.heartbeatTimer.Reset(heartbeatPeriod)
-	n.stateUpdateRequestCh <- ur
-	response := <-ur.response
-	if response != 200 {
-		w.WriteHeader(response)
+	select {
+	case n.stateUpdateRequestCh <- ur:
+		response := <-ur.response
+		if response != 200 {
+			w.WriteHeader(response)
+		}
+	case <-r.Context().Done():
 	}
 }
 
@@ -66,12 +75,14 @@ func (n *Node) clientHandlerDelete(w http.ResponseWriter, r *http.Request) {
 	if n.getState() != Leader {
 		w.WriteHeader(422)
 		w.Write([]byte("Node is not a leader"))
+		log.Printf("clientHandlerUpdate: non-leader node")
 		return
 	}
 }
 
 func (n *Node) RunClientServer(addr string) error {
 	handler := http.NewServeMux()
+	handler.HandleFunc("GET /{key}", n.clientHandlerGet)
 	handler.HandleFunc("POST /{key}", n.clientHandlerUpdate)
 	handler.HandleFunc("DELETE /{key}", n.clientHandlerDelete)
 	handler.HandleFunc("GET /raft", n.clientHandlerRaft)

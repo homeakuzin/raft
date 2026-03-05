@@ -17,14 +17,30 @@ rule_files:
 
 scrape_configs:
   # Scrape configuration for your Go app running on host
-  - job_name: 'go_app_host'
+  - job_name: 'node1'
     static_configs:
       - targets: 
         - 'host.docker.internal:2112'  # For macOS/Windows
         # - '172.17.0.1:2112'  # Alternative for Linux (default Docker bridge IP)
     metrics_path: /metrics
-    scrape_interval: 10s
-    scrape_timeout: 5s
+    scrape_interval: 5s
+    scrape_timeout: 2s
+  - job_name: 'node2'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:2113'  # For macOS/Windows
+        # - '172.17.0.1:2112'  # Alternative for Linux (default Docker bridge IP)
+    metrics_path: /metrics
+    scrape_interval: 5s
+    scrape_timeout: 2s
+  - job_name: 'node3'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:2114'  # For macOS/Windows
+        # - '172.17.0.1:2112'  # Alternative for Linux (default Docker bridge IP)
+    metrics_path: /metrics
+    scrape_interval: 5s
+    scrape_timeout: 2s
     
   # Self-monitoring: Prometheus metrics about itself
   - job_name: 'prometheus'

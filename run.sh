@@ -24,9 +24,9 @@ echo "Build successful!"
 # Start nodes
 echo "Starting hyperraft nodes..."
 NODES="0:localhost:4000;1:localhost:4001;2:localhost:4002"
-./hyperraft $@ -nodes=$NODES -id=0 & PIDS+=($!)
-./hyperraft $@ -nodes=$NODES -id=1 & PIDS+=($!)
-./hyperraft $@ -nodes=$NODES -id=2 & PIDS+=($!)
+./hyperraft $@ -nodes=$NODES -id=0 -metricsaddr 0.0.0.0:2112 -clientaddr 0.0.0.0:3450 & PIDS+=($!)
+./hyperraft $@ -nodes=$NODES -id=1 -metricsaddr 0.0.0.0:2113 -clientaddr 0.0.0.0:3451 & PIDS+=($!)
+./hyperraft $@ -nodes=$NODES -id=2 -metricsaddr 0.0.0.0:2114 -clientaddr 0.0.0.0:3452 & PIDS+=($!)
 
 echo "Process PIDs: ${PIDS[@]}"
 echo "Press Ctrl+C to stop all nodes"

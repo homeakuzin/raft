@@ -25,7 +25,7 @@ type AppendEntries struct {
 	LeaderId     NodeId
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []byte
+	Entries      []Entry
 	LeaderCommit int
 }
 
