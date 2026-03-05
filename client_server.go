@@ -25,9 +25,9 @@ func (n *Node) clientHandlerRaft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Node) clientHandlerGet(w http.ResponseWriter, r *http.Request) {
-	value, ok := n.stateMachine.Get(r.PathValue("key"))
+	value, ok := n.stateMachine.storage.Get(r.PathValue("key"))
 	if ok {
-		w.Write(value)
+		w.Write([]byte(value))
 	} else {
 		w.WriteHeader(404)
 	}
@@ -52,21 +52,26 @@ func (n *Node) clientHandlerUpdate(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Node is not a leader"))
 		return
 	}
+	cmd := Command{
+		Action: ActionSet,
+		Key:    r.PathValue("key"),
+		Value:  string(value),
+	}
+	cmdJson, err := json.Marshal(&cmd)
+	if err != nil {
+		log.Printf("clientHandlerUpdate: Marshal Command: %s", err.Error())
+		w.WriteHeader(500)
+		return
+	}
 	ur := updateRequest{
-		Command{
-			Action: ActionSet,
-			Key:    r.PathValue("key"),
-			Value:  value,
-		},
+		cmdJson,
 		make(chan int),
 	}
 	n.heartbeatTimer.Reset(heartbeatPeriod)
 	select {
 	case n.stateUpdateRequestCh <- ur:
-		response := <-ur.response
-		if response != 200 {
-			w.WriteHeader(response)
-		}
+		<-ur.commited
+		w.WriteHeader(200)
 	case <-r.Context().Done():
 	}
 }

@@ -45,8 +45,8 @@ type appendEntriesRpcCall struct {
 }
 
 type updateRequest struct {
-	cmd      Command
-	response chan int
+	cmd      []byte
+	commited chan int
 }
 
 type Node struct {
@@ -87,7 +87,7 @@ func (n *Node) getCurrentTerm() int {
 	return n.currentTerm
 }
 
-func NewNode(id NodeId, nodes map[NodeId]string) *Node {
+func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
 	otherNodeIds := []NodeId{}
 	for otherId := range nodes {
 		if id != otherId {
@@ -96,7 +96,7 @@ func NewNode(id NodeId, nodes map[NodeId]string) *Node {
 	}
 	return &Node{Id: id,
 		nodes:                nodes,
-		stateMachine:         NewStateMachine(),
+		stateMachine:         NewStateMachine(storage),
 		stateUpdateRequestCh: make(chan updateRequest),
 		shutdown:             make(chan struct{}),
 		otherNodeIds:         otherNodeIds,
@@ -360,7 +360,7 @@ func (n *Node) eventLoop() {
 					n.logger.Printf("set CommitIndex = %d", commitIndex)
 					n.stateMachine.SetCommitIndex(commitIndex)
 					n.stateMachine.Apply(commitIndex)
-					appendEntriesResult.client <- 200
+					appendEntriesResult.client <- commitIndex
 				}
 			} else {
 				n.mu.Lock()
@@ -388,7 +388,7 @@ func (n *Node) eventLoop() {
 					if err != nil {
 						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.response, id}
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.commited, id}
 					}
 				}()
 			}
@@ -655,7 +655,8 @@ func main() {
 		go http.ListenAndServe(*flagMetricsAddr, nil)
 	}
 
-	node := NewNode(nodeId, nodes)
+	kvStorage := &KVStorage{state: map[string]string{}}
+	node := NewNode(nodeId, nodes, kvStorage)
 	if *flagVerbose {
 		node.Verbose()
 	}

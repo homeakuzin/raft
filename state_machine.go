@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -15,7 +17,7 @@ const (
 type Command struct {
 	Action Action
 	Key    string
-	Value  []byte
+	Value  string
 }
 
 func (c Command) String() string {
@@ -26,21 +28,63 @@ func (c Command) String() string {
 	}
 }
 
+type KVStorage struct {
+	mu    sync.Mutex
+	state map[string]string
+}
+
+func (s *KVStorage) Get(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	val, ok := s.state[key]
+	return val, ok
+}
+
+func (s *KVStorage) ApplyCommand(command []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var cmd Command
+	if err := json.Unmarshal(command, &cmd); err != nil {
+		log.Printf("KVStorage: could not parse command json: %s", err.Error())
+	}
+	switch cmd.Action {
+	case ActionSet:
+		s.state[cmd.Key] = cmd.Value
+	case ActionDelete:
+		delete(s.state, cmd.Key)
+	}
+}
+
+func (s *KVStorage) MustGet(key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	val, ok := s.state[key]
+	if !ok {
+		panic("key not present in KVStorage")
+	}
+	return val
+}
+
 type Entry struct {
-	Command Command
+	Command []byte
 	Term    int
+}
+
+type StateStorage interface {
+	ApplyCommand(command []byte)
+	Get(key string) (string, bool) // TODO remove after completely separating storage and node
 }
 
 type StateMachine struct {
 	mu          sync.Mutex
 	logs        []Entry
-	state       map[string][]byte
+	storage     StateStorage
 	lastApplied int
 	commitIndex int
 }
 
-func NewStateMachine() *StateMachine {
-	return &StateMachine{mu: sync.Mutex{}, state: make(map[string][]byte), lastApplied: -1, commitIndex: -1}
+func NewStateMachine(storage StateStorage) *StateMachine {
+	return &StateMachine{storage: storage, mu: sync.Mutex{}, lastApplied: -1, commitIndex: -1}
 }
 
 func (m *StateMachine) LastApplied() int {
@@ -59,16 +103,6 @@ func (m *StateMachine) CommitIndex() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.commitIndex
-}
-
-func (m *StateMachine) MustGet(key string) []byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	val, ok := m.state[key]
-	if !ok {
-		panic("key not present in state machine")
-	}
-	return val
 }
 
 func (m *StateMachine) Last() (Entry, int, bool) {
@@ -113,13 +147,6 @@ func (m *StateMachine) NextEntriesForFollower(from int) []Entry {
 	return m.logs[from:]
 }
 
-func (m *StateMachine) Get(key string) ([]byte, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	val, ok := m.state[key]
-	return val, ok
-}
-
 func (m *StateMachine) AppendLogs(logs ...Entry) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -134,12 +161,7 @@ func (m *StateMachine) Apply(until int) {
 	defer m.mu.Unlock()
 	for i := m.lastApplied + 1; i <= until; i++ {
 		log := m.logs[i]
-		switch log.Command.Action {
-		case ActionSet:
-			m.state[log.Command.Key] = log.Command.Value
-		case ActionDelete:
-			delete(m.state, log.Command.Key)
-		}
+		m.storage.ApplyCommand(log.Command)
 	}
 	m.lastApplied = until
 }

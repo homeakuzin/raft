@@ -24,9 +24,9 @@ func TestConsensys(t *testing.T) {
 		2: "localhost:5511",
 		3: "localhost:5512",
 	}
-	n1 := NewNode(1, nodes).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes).LogPrefixId() //.Verbose()
+	n1 := NewNode(1, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
 	nodeStructs := map[NodeId]*Node{
 		1: n1,
 		2: n2,
@@ -101,9 +101,9 @@ func TestKeyValueReplication(t *testing.T) {
 		2: "localhost:5531",
 		3: "localhost:5532",
 	}
-	n1 := NewNode(1, nodes).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes).LogPrefixId() //.Verbose()
+	n1 := NewNode(1, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	n2 := NewNode(2, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
+	n3 := NewNode(3, nodes, &KVStorage{state: map[string]string{}}).LogPrefixId() //.Verbose()
 	go n1.Run()
 	go n2.Run()
 	go n3.Run()
