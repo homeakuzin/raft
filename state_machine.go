@@ -71,6 +71,15 @@ func (m *StateMachine) MustGet(key string) []byte {
 	return val
 }
 
+func (m *StateMachine) Last() (Entry, int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.logs) == 0 {
+		return Entry{}, 0, false
+	}
+	idx := len(m.logs) - 1
+	return m.logs[idx], idx, true
+}
 func (m *StateMachine) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -222,6 +222,12 @@ func (n *Node) eventLoop() {
 	for run.Load() {
 		select {
 		case appendEntries := <-n.appendEntriesRpc:
+			// Receiver implementation:
+			// 1. Reply false if term < currentTerm (§5.1)
+			// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+			// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+			// 4. Append any new entries not already in the log
+			// TODO 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 			response := AppendEntriesResult{}
 			if appendEntries.data.Term >= n.getCurrentTerm() {
 				n.setCurrentTerm(appendEntries.data.Term)
@@ -229,9 +235,10 @@ func (n *Node) eventLoop() {
 				response.Success = true
 			}
 			if appendEntries.data.LeaderCommit > n.stateMachine.CommitIndex() {
-				n.stateMachine.Apply(appendEntries.data.LeaderCommit)
-				n.stateMachine.SetCommitIndex(appendEntries.data.LeaderCommit)
-				n.logger.Printf("Applied commit index %d", appendEntries.data.LeaderCommit)
+				newCommit := appendEntries.data.LeaderCommit
+				n.stateMachine.Apply(newCommit)
+				n.stateMachine.SetCommitIndex(newCommit)
+				n.logger.Printf("Applied commit index %d", newCommit)
 			}
 			if len(appendEntries.data.Entries) > 0 {
 				if appendEntries.data.PrevLogIndex > 0 {
@@ -254,9 +261,14 @@ func (n *Node) eventLoop() {
 			response.Term = n.getCurrentTerm()
 			appendEntries.result <- response
 		case requestVote := <-n.requestVoteRpc:
+			// Receiver implementation:
+			// 1. Reply false if term < currentTerm (§5.1)
+			// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2,§5.4)
 			n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
 			response := RequestVoteResult{}
-			if requestVote.data.Term > n.getCurrentTerm() || n.getVotedFor() == EmptyId {
+			lastLog, lastIndex, ok := n.stateMachine.Last()
+			candidateUpToDate := !ok || lastIndex >= requestVote.data.LastLogIndex && lastLog.Term >= requestVote.data.LastLogTerm
+			if requestVote.data.Term > n.getCurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
 				n.setCurrentTerm(requestVote.data.Term)
 				n.becomeFollower()
 				n.setVotedFor(requestVote.data.CandidateId)
@@ -637,6 +649,7 @@ func main() {
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
+		// TODO broadcastTime/electionTimeout/MTBF metrics
 		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 		log.Printf("exposing prometheus metrics at %s", *flagMetricsAddr)
 		go http.ListenAndServe(*flagMetricsAddr, nil)
