@@ -70,16 +70,7 @@ func (s ClientServer) clientHandlerUpdate(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(500)
 		return
 	}
-	ur := raft.UpdateRequest{
-		cmdJson,
-		make(chan int),
-	}
-	select {
-	case s.node.StateUpdateRequestCh <- ur:
-		<-ur.Commited
-		w.WriteHeader(200)
-	case <-r.Context().Done():
-	}
+	s.node.ClientCommand(r.Context(), cmdJson)
 }
 
 func RunClientServer(addr string, node *raft.Node, storage *storage.KVStorage) error {

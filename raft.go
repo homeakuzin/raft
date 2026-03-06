@@ -34,35 +34,34 @@ type appendEntriesRpcCall struct {
 	result chan AppendEntriesResult
 }
 
-type UpdateRequest struct {
+type clientRequest struct {
 	Cmd      []byte
 	Commited chan int
 }
 
 type Node struct {
-	mu             sync.Mutex
-	Id             NodeId
-	votedFor       NodeId
-	votesHave      int
-	currentTerm    int
-	state          State
-	electionTimer  *time.Timer
-	heartbeatTimer *time.Timer
-	shutdown       chan struct{}
-	nodes          map[NodeId]string
-	otherNodeIds   []NodeId
-	nextIndex      map[NodeId]int
-	matchIndex     map[NodeId]int
-	stateMachine   *StateMachine
-	httpServer     *http.Server
-	reportTick     *time.Ticker
-	verbose        bool
-	string
-	requestVoteRpc       chan requestVoteRpcCall
-	appendEntriesRpc     chan appendEntriesRpcCall
-	commitCh             chan int
-	StateUpdateRequestCh chan UpdateRequest
-	logger               *log.Logger
+	mu               sync.Mutex
+	Id               NodeId
+	votedFor         NodeId
+	votesHave        int
+	currentTerm      int
+	state            State
+	electionTimer    *time.Timer
+	heartbeatTimer   *time.Timer
+	shutdown         chan struct{}
+	nodes            map[NodeId]string
+	otherNodeIds     []NodeId
+	nextIndex        map[NodeId]int
+	matchIndex       map[NodeId]int
+	stateMachine     *StateMachine
+	httpServer       *http.Server
+	reportTick       *time.Ticker
+	verbose          bool
+	requestVoteRpc   chan requestVoteRpcCall
+	appendEntriesRpc chan appendEntriesRpcCall
+	commitCh         chan int
+	clientRequestCh  chan clientRequest
+	logger           *log.Logger
 }
 
 func (n *Node) Verbose() *Node {
@@ -78,16 +77,16 @@ func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
 		}
 	}
 	return &Node{Id: id,
-		nodes:                nodes,
-		stateMachine:         NewStateMachine(storage),
-		StateUpdateRequestCh: make(chan UpdateRequest),
-		shutdown:             make(chan struct{}),
-		otherNodeIds:         otherNodeIds,
-		requestVoteRpc:       make(chan requestVoteRpcCall),
-		appendEntriesRpc:     make(chan appendEntriesRpcCall),
-		nextIndex:            make(map[NodeId]int),
-		matchIndex:           make(map[NodeId]int),
-		logger:               log.Default(),
+		nodes:            nodes,
+		stateMachine:     NewStateMachine(storage),
+		clientRequestCh:  make(chan clientRequest),
+		shutdown:         make(chan struct{}),
+		otherNodeIds:     otherNodeIds,
+		requestVoteRpc:   make(chan requestVoteRpcCall),
+		appendEntriesRpc: make(chan appendEntriesRpcCall),
+		nextIndex:        make(map[NodeId]int),
+		matchIndex:       make(map[NodeId]int),
+		logger:           log.Default(),
 	}
 }
 
@@ -161,6 +160,18 @@ func (n *Node) Shutdown() {
 	}
 	if n.reportTick != nil {
 		n.reportTick.Stop()
+	}
+}
+
+func (n *Node) ClientCommand(ctx context.Context, command []byte) {
+	ur := clientRequest{
+		command,
+		make(chan int),
+	}
+	select {
+	case n.clientRequestCh <- ur:
+		<-ur.Commited
+	case <-ctx.Done():
 	}
 }
 
@@ -363,7 +374,7 @@ func (n *Node) eventLoop() {
 					}
 				}()
 			}
-		case req := <-n.StateUpdateRequestCh:
+		case req := <-n.clientRequestCh:
 			n.logger.Printf("Incoming request: %s", req.Cmd)
 			n.stateMachine.AppendLogs(Entry{req.Cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {

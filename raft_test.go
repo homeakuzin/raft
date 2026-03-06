@@ -2,7 +2,6 @@ package raft_test
 
 import (
 	"context"
-	"raft"
 	"testing"
 	"time"
 
@@ -124,15 +123,7 @@ func TestKeyValueReplication(t *testing.T) {
 	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	ur := raft.UpdateRequest{
-		[]byte(`{"Action":0,"Key":"x","Value":"3"}`),
-		make(chan int),
-	}
-	select {
-	case nodeStructs[leader].StateUpdateRequestCh <- ur:
-		<-ur.Commited
-	case <-timeout.Done():
-	}
+	nodeStructs[leader].ClientCommand(timeout, []byte(`{"Action":0,"Key":"x","Value":"3"}`))
 
 	waitABit()
 	for id := range nodes {
