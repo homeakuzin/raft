@@ -4,17 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"raft"
 	"raft/storage"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var flagVerbose = flag.Bool("v", false, "enables verbose output")
@@ -26,8 +21,6 @@ func main() {
 	flagNodes := flag.String("nodes", "", "id:host:port joined by semicolon. Example:\n\t0:0.0.0.1:1234;1:0.0.0.2:2345;2:0.0.0.3:3456")
 	flagNodeId := flag.Int("id", int(raft.EmptyId), "Current node ID")
 	flagClientAddr := flag.String("clientaddr", "", "Address to serve HTTP clients")
-	flagMetricsAddr := flag.String("metricsaddr", "", "Address to serve prometheus metrics")
-	flagReport := flag.Bool("report", false, "Whether to report node state every second")
 	flag.Parse()
 
 	nodeId := raft.NodeId(*flagNodeId)
@@ -56,25 +49,10 @@ func main() {
 		log.Fatalf("No node with id %d", *flagNodeId)
 	}
 
-	if *flagMetricsAddr != "" {
-		reg := prometheus.NewRegistry()
-		reg.MustRegister(
-			collectors.NewGoCollector(),
-			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		)
-		// TODO broadcastTime/electionTimeout/MTBF metrics
-		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-		log.Printf("exposing prometheus metrics at %s", *flagMetricsAddr)
-		go http.ListenAndServe(*flagMetricsAddr, nil)
-	}
-
 	kvStorage := storage.NewKVStorage()
 	node := raft.NewNode(nodeId, nodes, kvStorage)
 	if *flagVerbose {
 		node.Verbose()
-	}
-	if *flagReport {
-		node.StartReporting()
 	}
 	if *flagClientAddr != "" {
 		go func() {

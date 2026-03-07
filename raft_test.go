@@ -51,7 +51,7 @@ func TestConsensys(t *testing.T) {
 	asserts.Equal(t, firstTerm, n3.CurrentTerm())
 
 	firstEverLeader := roles[Leader][0]
-	nodeStructs[firstEverLeader].Shutdown()
+	nodeStructs[firstEverLeader].Shutdown(t.Context())
 	waitABit()
 
 	var newLeaderTerm int
@@ -132,7 +132,7 @@ func TestKeyValueReplication(t *testing.T) {
 		asserts.Equal(t, "3", string(value))
 	}
 
-	nodeStructs[leader].Shutdown()
+	nodeStructs[leader].Shutdown(t.Context())
 	waitABit()
 	for _, id := range roles[Follower] {
 		value, ok := kvs[id].Get("x")

@@ -1,4 +1,4 @@
 raft
 tmp/
 example/kv/kv
-example/hyperraft/hyperraft
+example/showcase/showcase

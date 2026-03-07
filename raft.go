@@ -35,8 +35,8 @@ type appendEntriesRpcCall struct {
 }
 
 type clientRequest struct {
-	Cmd      []byte
-	Commited chan int
+	cmd      []byte
+	commited chan int
 }
 
 type Node struct {
@@ -53,9 +53,8 @@ type Node struct {
 	otherNodeIds     []NodeId
 	nextIndex        map[NodeId]int
 	matchIndex       map[NodeId]int
-	stateMachine     *StateMachine
+	StateMachine     *StateMachine
 	httpServer       *http.Server
-	reportTick       *time.Ticker
 	verbose          bool
 	requestVoteRpc   chan requestVoteRpcCall
 	appendEntriesRpc chan appendEntriesRpcCall
@@ -78,7 +77,7 @@ func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
 	}
 	return &Node{Id: id,
 		nodes:            nodes,
-		stateMachine:     NewStateMachine(storage),
+		StateMachine:     NewStateMachine(storage),
 		clientRequestCh:  make(chan clientRequest),
 		shutdown:         make(chan struct{}),
 		otherNodeIds:     otherNodeIds,
@@ -153,13 +152,11 @@ func (n *Node) setVotesHave(value int) {
 	n.votesHave = value
 }
 
-func (n *Node) Shutdown() {
+func (n *Node) Shutdown(ctx context.Context) {
 	n.shutdown <- struct{}{}
-	if err := n.httpServer.Shutdown(context.Background()); err != nil {
+	close(n.shutdown)
+	if err := n.httpServer.Shutdown(ctx); err != nil {
 		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
-	}
-	if n.reportTick != nil {
-		n.reportTick.Stop()
 	}
 }
 
@@ -170,24 +167,16 @@ func (n *Node) ClientCommand(ctx context.Context, command []byte) {
 	}
 	select {
 	case n.clientRequestCh <- ur:
-		<-ur.Commited
+		<-ur.commited
 	case <-ctx.Done():
 	}
-}
-
-func (n *Node) StartReporting() {
-	n.reportTick = time.NewTicker(time.Second)
-	go func() {
-		for range n.reportTick.C {
-			n.report()
-		}
-	}()
 }
 
 func (n *Node) Run() {
 	go func() {
 		if err := n.runServer(); err != nil {
-			n.Shutdown()
+			log.Printf("could not run node server: %s", err.Error())
+			n.Shutdown(context.Background())
 		}
 	}()
 	n.votedFor = EmptyId
@@ -231,27 +220,27 @@ func (n *Node) eventLoop() {
 				n.becomeFollower()
 				response.Success = true
 			}
-			if appendEntries.data.LeaderCommit > n.stateMachine.CommitIndex() {
+			if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
 				newCommit := appendEntries.data.LeaderCommit
-				n.stateMachine.Apply(newCommit)
-				n.stateMachine.SetCommitIndex(newCommit)
+				n.StateMachine.Apply(newCommit)
+				n.StateMachine.SetCommitIndex(newCommit)
 				n.logger.Printf("Applied commit index %d", newCommit)
 			}
 			if len(appendEntries.data.Entries) > 0 {
 				if appendEntries.data.PrevLogIndex > 0 {
-					lastEntry, ok := n.stateMachine.At(appendEntries.data.PrevLogIndex)
+					lastEntry, ok := n.StateMachine.At(appendEntries.data.PrevLogIndex)
 					if ok {
 						if lastEntry.Term == appendEntries.data.PrevLogTerm {
 							response.Success = true
-							n.stateMachine.AppendLogs(appendEntries.data.Entries...)
+							n.StateMachine.AppendLogs(appendEntries.data.Entries...)
 							n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 						} else {
-							n.stateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
+							n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
 						}
 					}
 				} else {
 					response.Success = true
-					n.stateMachine.AppendLogs(appendEntries.data.Entries...)
+					n.StateMachine.AppendLogs(appendEntries.data.Entries...)
 					n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
 				}
 			}
@@ -263,7 +252,7 @@ func (n *Node) eventLoop() {
 			// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2,§5.4)
 			n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
 			response := RequestVoteResult{}
-			lastLog, lastIndex, ok := n.stateMachine.Last()
+			lastLog, lastIndex, ok := n.StateMachine.Last()
 			candidateUpToDate := !ok || lastIndex >= requestVote.data.LastLogIndex && lastLog.Term >= requestVote.data.LastLogTerm
 			if requestVote.data.Term > n.CurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
 				n.setCurrentTerm(requestVote.data.Term)
@@ -346,7 +335,7 @@ func (n *Node) eventLoop() {
 				n.nextIndex[appendEntriesResult.id] += len(appendEntriesResult.request.Entries)
 				n.matchIndex[appendEntriesResult.id] = n.nextIndex[appendEntriesResult.id] - 1
 				matchCount := 1
-				commitIndex := n.stateMachine.CommitIndex()
+				commitIndex := n.StateMachine.CommitIndex()
 				for _, peerId := range n.otherNodeIds {
 					if n.matchIndex[peerId] > commitIndex {
 						matchCount++
@@ -355,8 +344,8 @@ func (n *Node) eventLoop() {
 				if matchCount*2 > len(n.otherNodeIds)+1 {
 					commitIndex += len(appendEntriesResult.request.Entries)
 					n.logger.Printf("set CommitIndex = %d", commitIndex)
-					n.stateMachine.SetCommitIndex(commitIndex)
-					n.stateMachine.Apply(commitIndex)
+					n.StateMachine.SetCommitIndex(commitIndex)
+					n.StateMachine.Apply(commitIndex)
 					appendEntriesResult.client <- commitIndex
 				}
 			} else {
@@ -375,8 +364,13 @@ func (n *Node) eventLoop() {
 				}()
 			}
 		case req := <-n.clientRequestCh:
-			n.logger.Printf("Incoming request: %s", req.Cmd)
-			n.stateMachine.AppendLogs(Entry{req.Cmd, n.CurrentTerm()})
+			if state := n.State(); state != Leader {
+				n.logger.Printf("Warning: got client request in state %s", state)
+				req.commited <- 1
+				break
+			}
+			n.logger.Printf("Incoming request: %s", req.cmd)
+			n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				nodeHost := n.nodes[id]
 				go func() {
@@ -385,7 +379,7 @@ func (n *Node) eventLoop() {
 					if err != nil {
 						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
 					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.Commited, id}
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.commited, id}
 					}
 				}()
 			}
@@ -409,16 +403,16 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 	entries := make([]Entry, 0)
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := 0
-	if prevLogIndex < n.stateMachine.Len() {
-		entries = n.stateMachine.NextEntriesForFollower(nextIndex)
+	if prevLogIndex < n.StateMachine.Len() {
+		entries = n.StateMachine.NextEntriesForFollower(nextIndex)
 		if prevLogIndex > 0 {
-			prevLogTerm = n.stateMachine.MustAt(prevLogIndex).Term
+			prevLogTerm = n.StateMachine.MustAt(prevLogIndex).Term
 		}
 	}
 	return AppendEntries{
 		Term:         n.CurrentTerm(),
 		LeaderId:     n.Id,
-		LeaderCommit: n.stateMachine.CommitIndex(),
+		LeaderCommit: n.StateMachine.CommitIndex(),
 		Entries:      entries,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
@@ -448,17 +442,11 @@ func (n *Node) becomeLeader() {
 		n.logger.Printf("Turning to a Leader")
 	}
 	for _, id := range n.otherNodeIds {
-		n.nextIndex[id] = n.stateMachine.LastApplied() + 1
+		n.nextIndex[id] = n.StateMachine.LastApplied() + 1
 		n.matchIndex[id] = 0
 	}
 	n.electionTimer.Stop()
 	n.heartbeatTimer.Reset(heartbeatPeriod)
-}
-
-func (n *Node) report() {
-	n.mu.Lock()
-	n.logger.Printf("State => %s. Term => %d.", n.state, n.currentTerm)
-	n.mu.Unlock()
 }
 
 func (n *Node) issueRequestVote(ctx context.Context, host string) (result RequestVoteResult, err error) {
