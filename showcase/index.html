@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raft Consensus Showcase</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --secondary: #7c3aed;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --info: #0ea5e9;
+            --background: #0f172a;
+            --surface: #1e293b;
+            --surface-light: #334155;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #475569;
+            --border-light: #64748b;
+            --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h2 {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h2 i {
+            color: var(--primary);
+            font-size: 20px;
+        }
+
+        /* Scrollbar Styling */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--surface);
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-light);
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--border);
+        }
+        
+        table {
+          border-collapse: collapse;
+          border: 2px solid rgb(140 140 140);
+          font-family: sans-serif;
+          font-size: 0.8rem;
+          letter-spacing: 1px;
+        }
+        
+        caption {
+          caption-side: bottom;
+          padding: 10px;
+          font-weight: bold;
+        }
+        
+        button {
+            padding: 3px;
+        }
+        
+        thead,
+        tfoot {
+          background-color: rgb(228 240 245);
+        }
+        
+        th,
+        td {
+          border: 1px solid rgb(160 160 160);
+          padding: 8px 10px;
+        }
+        
+        td:last-of-type {
+          text-align: center;
+        }
+        
+        .color-Leader {
+            background-color: green;
+        }
+        .color-Candidate {
+            background-color: var(--secondary);
+        }
+        .color-Follower {
+            background-color: gray;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="nodes"></div>
+    </div>
+
+    <script>
+    const wsUrl = `ws://${window.location.host}/status`;
+
+    try {
+        let ws = new WebSocket(wsUrl);
+        let heartbeatInterval;
+        let openInterval;
+        ws.onopen = () => {
+            clearInterval(openInterval)
+            heartbeatInterval = setInterval(() => {
+                ws.send("");
+            }, 1000);
+            ws.send("")
+        };
+
+        ws.onclose = (event) => {
+            console.log(`WebSocket connection closed: ${event.code} ${event.reason || ''}`);
+            clearInterval(heartbeatInterval)
+            openInterval = setInterval(() => {
+                ws = new WebSocket(wsUrl)
+            }, 1000)
+        };
+
+        ws.onerror = (event) => {
+            console.log('WebSocket error occurred');
+        };
+
+        ws.onmessage = (event) => {
+            const cluster = JSON.parse(event.data)
+            let nodeRows = '';
+            for (let node of cluster.Nodes) {
+                const statusBtn = document.createElement('button')
+                statusBtn.setAttribute('data-node', node.Name);
+                statusBtn.setAttribute('data-commandTrigger', 'click');
+                if (node.State === "Dead") {
+                    statusBtn.innerHTML = 'Start';
+                    statusBtn.setAttribute('data-command', 'start');
+                } else {
+                    statusBtn.innerHTML = 'Stop';
+                    statusBtn.setAttribute('data-command', 'stop');
+                }
+                nodeRows += `
+                <tr class="color-${node.State}">
+                    <td>${node.Name}</td>
+                    <td>${node.State}</td>
+                    <td>
+                        Term ${node.Term}
+                        <br>
+                        Commit ${node.Commit}
+                        <br>
+                        LastLogIndex ${node.LastLogIndex}
+                    </td>
+                    <td>${statusBtn.outerHTML}</td>
+                </tr>`;
+            }
+            const table = `
+            <table>
+                <tbody>
+                ${nodeRows}
+                </tbody>
+            </table>`;
+            nodes.innerHTML = table;
+            const triggers = document.querySelectorAll('[data-commandtrigger]');
+            for (let el of triggers) {
+                el.addEventListener(el.getAttribute('data-commandtrigger'), e => {
+                    const node = el.getAttribute('data-node');
+                    const data = el.getAttribute('data-data');
+                    const json = {Node: node, Command: el.getAttribute('data-command')};
+                    if (data) {
+                        json.Data = data;
+                    }
+                    ws.send(JSON.stringify(json))
+                })
+            }
+        };
+    } catch (error) {
+        console.log(`Failed to create WebSocket: ${error.message}`);
+    }
+    </script>
+</body>
+</html>
