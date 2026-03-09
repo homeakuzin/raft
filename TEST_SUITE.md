@@ -36,6 +36,7 @@ Ensure that candidates with stale terms cannot win elections. If a candidate's t
 
 Validate that an elected leader sends periodic heartbeats (AppendEntries RPCs with no entries) to all followers to maintain authority and prevent new elections.
 
+
 ### Log Replication Tests
 
 **Test #9 - Basic Log Entry Replication**
@@ -70,6 +71,7 @@ Simulate a follower crashing mid-replication. When it recovers, verify that the 
 
 Create a partition that isolates a minority of followers. Verify that the leader continues to commit entries with the majority, and upon healing, the isolated nodes catch up.
 
+
 ### Safety and Persistence Tests
 
 **Test #17 - Leader Completeness Property**
@@ -92,6 +94,7 @@ Test that read-only operations processed by leaders without checking up-to-daten
 
 Crash the leader immediately after committing an entry but before responding to client. Verify that the new leader contains that committed entry and no inconsistency occurs.
 
+
 ### Membership Changes Tests
 
 **Test #22 - Single Server Addition**
@@ -110,6 +113,7 @@ During membership changes, verify that the cluster operates in joint consensus w
 
 Test handling of overlapping membership changes. Verify that only one configuration change can be in progress at a time.
 
+
 ### Snapshot and Log Compaction Tests
 
 **Test #26 - Snapshot Creation**
@@ -123,6 +127,7 @@ Test that a slow follower or new server can receive and apply a snapshot from th
 **Test #28 - Snapshot and Log Consistency**
 
 After installing a snapshot, verify that the node's log and state machine remain consistent with the rest of the cluster.
+
 
 ### Fault Tolerance and Recovery Tests
 
@@ -150,6 +155,7 @@ Test that nodes correctly handle duplicate RPCs (AppendEntries and RequestVote) 
 
 Verify that the system correctly handles messages that arrive out of order due to network conditions.
 
+
 ### Edge Cases and Specific Scenarios
 
 **Test #35 - Previous Leader Confusion**
@@ -175,6 +181,7 @@ Flood the leader with concurrent client requests. Verify that requests are proce
 **Test #40 - Long-Running Stability**
 
 Run the cluster under load for an extended period, performing random node failures/recoveries. Verify that consistency invariants hold throughout.
+
 
 ### Performance and Scalability Tests
 
