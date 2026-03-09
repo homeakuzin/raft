@@ -1,15 +1,10 @@
 package raft
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -39,8 +34,9 @@ type clientRequest struct {
 }
 
 type Node struct {
-	mu               sync.Mutex
 	Id               NodeId
+	transport        Transport
+	mu               sync.Mutex
 	votedFor         NodeId
 	votesHave        int
 	currentTerm      int
@@ -53,7 +49,6 @@ type Node struct {
 	nextIndex        map[NodeId]int
 	matchIndex       map[NodeId]int
 	StateMachine     *StateMachine
-	httpServer       *http.Server
 	verbose          bool
 	requestVoteRpc   chan requestVoteRpcCall
 	appendEntriesRpc chan appendEntriesRpcCall
@@ -67,14 +62,16 @@ func (n *Node) Verbose() *Node {
 	return n
 }
 
-func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
+func NewNode(id NodeId, nodes map[NodeId]string, transport Transport, storage StateStorage) *Node {
 	otherNodeIds := []NodeId{}
 	for otherId := range nodes {
 		if id != otherId {
 			otherNodeIds = append(otherNodeIds, otherId)
 		}
 	}
-	return &Node{Id: id,
+	return &Node{
+		Id:               id,
+		transport:        transport,
 		nodes:            nodes,
 		state:            Dead,
 		otherNodeIds:     otherNodeIds,
@@ -156,7 +153,7 @@ func (n *Node) Shutdown(ctx context.Context) {
 		return
 	}
 	n.logger.Print("shutting down")
-	if err := n.httpServer.Shutdown(ctx); err != nil {
+	if err := n.transport.Shutdown(ctx); err != nil {
 		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
 	n.shutdown <- struct{}{}
@@ -180,7 +177,7 @@ func (n *Node) Run() {
 		n.logger.Print("already running")
 		return
 	}
-	if err := n.runServer(); err != nil {
+	if err := n.transport.Serve(n); err != nil {
 		n.logger.Printf("could not run node server: %s", err.Error())
 		n.Shutdown(context.Background())
 	}
@@ -282,13 +279,15 @@ eventLoop:
 			requestVote.result <- response
 		case <-n.electionTimer.C:
 			n.becomeCandidate()
-			for i := range n.otherNodeIds {
-				nodeHost := n.nodes[n.otherNodeIds[i]]
+			for _, id := range n.otherNodeIds {
 				go func() {
-					n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
-					result, err := n.issueRequestVote(context.Background(), nodeHost)
+					n.dlog("issuing RequestVote to %s", id)
+					result, err := n.transport.IssueRequestVote(context.Background(), RequestVote{
+						Term:        n.CurrentTerm(),
+						CandidateId: n.Id,
+					}, id)
 					if err != nil {
-						n.dlog("could not issue RequestVote to %s: %s", n.otherNodeIds[i], err.Error())
+						n.dlog("could not issue RequestVote to %s: %s", id, err.Error())
 					} else {
 						requestVoteResponse <- result
 					}
@@ -319,9 +318,8 @@ eventLoop:
 			}
 			appendEntriesCtx := context.Background()
 			for _, id := range n.otherNodeIds {
-				nodeHost := n.nodes[id]
 				go func() {
-					result, err := n.issueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), nodeHost)
+					result, err := n.transport.IssueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), id)
 					if err != nil {
 						n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
 					} else {
@@ -392,9 +390,8 @@ eventLoop:
 				n.nextIndex[appendEntriesResult.id]--
 				n.mu.Unlock()
 				go func() {
-					nodeHost := n.nodes[appendEntriesResult.id]
 					appendEntries := n.makeAppendEntries(appendEntriesResult.id)
-					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
+					result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, appendEntriesResult.id)
 					if err != nil {
 						n.logger.Printf("could not reissue AppendEntries to %s: %s", appendEntriesResult.id, err.Error())
 					} else {
@@ -411,10 +408,9 @@ eventLoop:
 			n.logger.Printf("Client request: %s", req.cmd)
 			n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {
-				nodeHost := n.nodes[id]
 				go func() {
 					appendEntries := n.makeAppendEntries(id)
-					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
+					result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, id)
 					if err != nil {
 						n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
 					} else {
@@ -487,145 +483,6 @@ func (n *Node) becomeLeader() {
 	}
 	n.electionTimer.Stop()
 	n.heartbeatTimer.Reset(heartbeatPeriod)
-}
-
-func (n *Node) issueRequestVote(ctx context.Context, host string) (result RequestVoteResult, err error) {
-	requestVote := RequestVote{
-		Term:        n.CurrentTerm(),
-		CandidateId: n.Id,
-	}
-	body, err := json.Marshal(&requestVote)
-	if err != nil {
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/request-vote", host), bytes.NewBuffer(body))
-	if err != nil {
-		return
-	}
-	client := http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		err = fmt.Errorf("node returned %d status code", resp.StatusCode)
-		return
-	}
-	resultBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	if err = json.Unmarshal(resultBytes, &result); err != nil {
-		return
-	}
-	return
-}
-
-func (n *Node) issueAppendEntries(ctx context.Context, appendEntries AppendEntries, host string) (AppendEntriesResult, error) {
-	var result AppendEntriesResult
-	body, err := json.Marshal(&appendEntries)
-	if err != nil {
-		return result, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/append-entries", host), bytes.NewBuffer(body))
-	if err != nil {
-		return result, err
-	}
-	client := http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return result, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		err = fmt.Errorf("node returned %d status code", resp.StatusCode)
-		return result, err
-	}
-	resultBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return result, err
-	}
-	err = json.Unmarshal(resultBytes, &result)
-	return result, err
-}
-
-func (n *Node) handlerRequestVote(w http.ResponseWriter, r *http.Request) {
-	time.Sleep(50 * time.Millisecond)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		n.logger.Printf("could not read body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-	var requestVote RequestVote
-	if err := json.Unmarshal(body, &requestVote); err != nil {
-		n.logger.Printf("invalid body: %s", err.Error())
-		w.WriteHeader(400)
-		return
-	}
-	responseCh := make(chan RequestVoteResult)
-	n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}
-	response := <-responseCh
-	responseBody, err := json.Marshal(&response)
-	if err != nil {
-		n.logger.Printf("could not serialize response body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-	if _, err := w.Write(responseBody); err != nil {
-		n.logger.Printf("could not write response body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-}
-
-func (n *Node) handlerAppendEntries(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		n.logger.Printf("could not read body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-	var appendEntries AppendEntries
-	if err := json.Unmarshal(body, &appendEntries); err != nil {
-		n.logger.Printf("invalid body: %s", err.Error())
-		w.WriteHeader(400)
-		return
-	}
-	responseCh := make(chan AppendEntriesResult)
-	n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}
-	response := <-responseCh
-	responseBody, err := json.Marshal(&response)
-	if err != nil {
-		n.logger.Printf("could not serialize response body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-	if _, err := w.Write(responseBody); err != nil {
-		n.logger.Printf("could not write response body: %s", err.Error())
-		w.WriteHeader(500)
-		return
-	}
-}
-
-func (n *Node) runServer() error {
-	handler := http.NewServeMux()
-	handler.HandleFunc("POST /rpc/request-vote", n.handlerRequestVote)
-	handler.HandleFunc("POST /rpc/append-entries", n.handlerAppendEntries)
-	host := n.nodes[n.Id]
-	n.logger.Printf("Running HTTP server at %v", host)
-	n.httpServer = &http.Server{Addr: host, Handler: handler}
-
-	addr := host
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	go n.httpServer.Serve(ln)
-	return nil
 }
 
 func (n *Node) dlog(format string, v ...any) {
