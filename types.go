@@ -24,6 +24,7 @@ type AppendEntries struct {
 	PrevLogTerm  int
 	Entries      []Entry
 	LeaderCommit int
+	LogIndex     int
 }
 
 type AppendEntriesResult struct {
@@ -61,6 +62,10 @@ func (s *State) UnmarshalJSON(p []byte) error {
 		*s = Leader
 		return nil
 	}
+	if string(p) == `"Dead"` {
+		*s = Dead
+		return nil
+	}
 	intvalue := int(*s)
 	err := json.Unmarshal(p, &intvalue)
 	*s = State(intvalue)
@@ -77,6 +82,9 @@ func (s State) String() string {
 	if s == Leader {
 		return "Leader"
 	}
+	if s == Dead {
+		return "Dead"
+	}
 	return "UNKNOWN"
 }
 
@@ -84,4 +92,5 @@ const (
 	Follower  State = iota
 	Candidate State = iota
 	Leader    State = iota
+	Dead      State = iota
 )

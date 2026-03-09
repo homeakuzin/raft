@@ -97,7 +97,7 @@ func (m *StateMachine) AppendLogs(logs ...Entry) int {
 func (m *StateMachine) Apply(until int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := m.lastApplied + 1; i <= until; i++ {
+	for i := m.lastApplied + 1; i <= until && i < len(m.logs); i++ {
 		log := m.logs[i]
 		m.storage.ApplyCommand(log.Command)
 	}

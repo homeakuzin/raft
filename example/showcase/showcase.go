@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -19,99 +21,20 @@ type showcaseHandler struct {
 }
 
 type nodeStatus struct {
-	Id     int
-	State  string
-	Term   int
-	Commit int
+	Id           int
+	Name         string
+	State        string
+	Term         int
+	Commit       int
+	LastLogIndex int
 }
-
-var homeTemplate = template.Must(template.New("").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<script>  
-window.addEventListener("load", function(evt) {
-
-    var output = document.getElementById("output");
-    var input = document.getElementById("input");
-    var ws;
-
-    var print = function(message) {
-        var d = document.createElement("div");
-        d.textContent = message;
-        output.appendChild(d);
-        output.scroll(0, output.scrollHeight);
-    };
-
-    document.getElementById("open").onclick = function(evt) {
-        if (ws) {
-            return false;
-        }
-        ws = new WebSocket("{{.}}");
-        ws.onopen = function(evt) {
-            print("OPEN");
-        }
-        ws.onclose = function(evt) {
-            print("CLOSE");
-            ws = null;
-        }
-        ws.onmessage = function(evt) {
-            print("RESPONSE: " + evt.data);
-        }
-        ws.onerror = function(evt) {
-            print("ERROR: " + evt.data);
-        }
-        return false;
-    };
-
-    document.getElementById("send").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        print("SEND: " + input.value);
-        ws.send(input.value);
-        return false;
-    };
-
-    document.getElementById("close").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        ws.close();
-        return false;
-    };
-
-});
-</script>
-</head>
-<body>
-<table>
-<tr><td valign="top" width="50%">
-<p>Click "Open" to create a connection to the server, 
-"Send" to send a message to the server and "Close" to close the connection. 
-You can change the message and send multiple times.
-<p>
-<form>
-<button id="open">Open</button>
-<button id="close">Close</button>
-<p><input id="input" type="text" value="Hello world!">
-<button id="send">Send</button>
-</form>
-</td><td valign="top" width="50%">
-<div id="output" style="max-height: 70vh;overflow-y: scroll;"></div>
-</td></tr></table>
-</body>
-</html>
-`))
 
 type clusterStatus struct {
 	Nodes []nodeStatus
 }
 
 func (h showcaseHandler) handlerMain(w http.ResponseWriter, r *http.Request) {
-	homeTemplate.Execute(w, "ws://"+r.Host+"/status")
-
+	http.ServeFile(w, r, "index.html")
 }
 
 func (h showcaseHandler) handlerStatus(w http.ResponseWriter, r *http.Request) {
@@ -122,63 +45,48 @@ func (h showcaseHandler) handlerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
+wsLoop:
 	for {
-		_, message, err := c.ReadMessage()
+		_, commandBytes, err := c.ReadMessage()
 		if err != nil {
 			log.Println("read:", err)
 			break
 		}
-		log.Printf("recv: %s", message)
+		if len(commandBytes) > 0 {
+			command := nodeCommand{}
+			if err := json.Unmarshal(commandBytes, &command); err != nil {
+				log.Print(err.Error())
+				continue
+			}
+			for _, node := range h.nodes {
+				if node.id.String() == command.Node {
+					resp, err := http.Post(fmt.Sprintf("http://%s/command", node.agentAddr), "", bytes.NewBuffer(commandBytes))
+					if err != nil {
+						log.Println(err.Error())
+						continue wsLoop
+					}
+					body, err := io.ReadAll(resp.Body)
+					if err != nil {
+						log.Println(err.Error())
+						continue wsLoop
+					}
+					resp.Body.Close()
+					if resp.StatusCode != 200 {
+						log.Printf("/command returned %d: `%s`", resp.StatusCode, body)
+						continue wsLoop
+					}
+				}
+			}
 
-		wg := sync.WaitGroup{}
-		statusesCh := make(chan nodeStatus, len(h.nodes))
-		statusErrCh := make(chan error, len(h.nodes))
-		for _, node := range h.nodes {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				resp, err := http.Get(fmt.Sprintf("http://%s/status", node.agentAddr))
-				if err != nil {
-					statusErrCh <- err
-					return
-				}
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					statusErrCh <- err
-					return
-				}
-				defer resp.Body.Close()
-				if resp.StatusCode != 200 {
-					statusErrCh <- fmt.Errorf("%s", body)
-					return
-				}
-				nodeStatus := nodeStatus{}
-				if err := json.Unmarshal(body, &nodeStatus); err != nil {
-					statusErrCh <- err
-					return
-				}
-				statusesCh <- nodeStatus
-			}()
-		}
-		wg.Wait()
-		close(statusesCh)
-		close(statusErrCh)
-		var statusErr error
-		for err := range statusErrCh {
-			if err != nil {
-				statusErr = err
-				break
+			if err := h.applyCommand(commandBytes); err != nil {
+				log.Print(err.Error())
+				continue
 			}
 		}
-		if statusErr != nil {
-			log.Printf("/status: %s", statusErr.Error())
-			err = c.WriteMessage(websocket.TextMessage, []byte(statusErr.Error()))
+		cluster, err := h.fetchStatus()
+		if err != nil {
+			log.Print(err.Error())
 			continue
-		}
-
-		cluster := clusterStatus{}
-		for status := range statusesCh {
-			cluster.Nodes = append(cluster.Nodes, status)
 		}
 
 		clusterBytes, err := json.Marshal(&cluster)
@@ -193,6 +101,100 @@ func (h showcaseHandler) handlerStatus(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+func (h showcaseHandler) applyCommand(command []byte) error {
+	wg := sync.WaitGroup{}
+	nodeErrCh := make(chan error, len(h.nodes))
+	for _, node := range h.nodes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(fmt.Sprintf("http://%s/apply", node.agentAddr), "", bytes.NewBuffer(command))
+			if err != nil {
+				nodeErrCh <- err
+				return
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				nodeErrCh <- err
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				nodeErrCh <- fmt.Errorf("%s", body)
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	close(nodeErrCh)
+	var errs error
+	for err := range nodeErrCh {
+		if err != nil {
+			log.Print(err.Error())
+			errs = errors.Join(errs, err)
+		}
+	}
+	return errs
+}
+
+func (h showcaseHandler) fetchStatus() (clusterStatus, error) {
+	wg := sync.WaitGroup{}
+	nodeResponseCh := make(chan nodeStatus, len(h.nodes))
+	nodeErrCh := make(chan error, len(h.nodes))
+	for _, node := range h.nodes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get(fmt.Sprintf("http://%s/status", node.agentAddr))
+			if err != nil {
+				nodeErrCh <- err
+				return
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				nodeErrCh <- err
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				nodeErrCh <- fmt.Errorf("%s", body)
+				return
+			}
+			nodeStatus := nodeStatus{}
+			if err := json.Unmarshal(body, &nodeStatus); err != nil {
+				nodeErrCh <- err
+				return
+			}
+			nodeResponseCh <- nodeStatus
+		}()
+	}
+	wg.Wait()
+	close(nodeResponseCh)
+	close(nodeErrCh)
+	var errs error
+	for err := range nodeErrCh {
+		if err != nil {
+			log.Print(err.Error())
+			errs = errors.Join(errs, err)
+		}
+	}
+	if errs != nil {
+		return clusterStatus{}, errs
+	}
+
+	cluster := clusterStatus{}
+	for status := range nodeResponseCh {
+		cluster.Nodes = append(cluster.Nodes, status)
+	}
+	slices.SortFunc(cluster.Nodes, func(a nodeStatus, b nodeStatus) int {
+		if a.Id > b.Id {
+			return 1
+		}
+		return -1
+	})
+	return cluster, nil
 }
 
 func runDashboard(addr string, nodes []showcaseNode) {

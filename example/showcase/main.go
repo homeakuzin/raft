@@ -25,7 +25,7 @@ type showcaseNode struct {
 }
 
 func main() {
-	log.SetFlags(log.Lmicroseconds)
+	log.SetFlags(log.Lmicroseconds | log.Ldate)
 	log.SetOutput(os.Stdout)
 	flag.Parse()
 
@@ -87,7 +87,7 @@ func runANode(nodes []showcaseNode) {
 
 	agent := newAgent(node)
 	go func() {
-		log.Printf("running agent at %s", agentAddr)
+		log.Printf("running agent at http://%s", agentAddr)
 		if err := agent.run(agentAddr); err != nil {
 			log.Printf("could not run agent: %s", err.Error())
 		}
@@ -105,14 +105,12 @@ func runANode(nodes []showcaseNode) {
 		// go http.ListenAndServe(*flagMetricsAddr, nil)
 	}
 
+	go node.Run()
+
 	sigint := make(chan os.Signal, 1)
 	signal.Notify(sigint, os.Interrupt)
-	go func() {
-		<-sigint
-		log.Print("SIGINT shutdown")
-		agent.shutdown(context.Background())
-		node.Shutdown(context.Background())
-	}()
-
-	node.Run()
+	<-sigint
+	log.Print("SIGINT shutdown")
+	agent.shutdown(context.Background())
+	node.Shutdown(context.Background())
 }

@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -77,15 +76,15 @@ func NewNode(id NodeId, nodes map[NodeId]string, storage StateStorage) *Node {
 	}
 	return &Node{Id: id,
 		nodes:            nodes,
+		state:            Dead,
+		otherNodeIds:     otherNodeIds,
 		StateMachine:     NewStateMachine(storage),
 		clientRequestCh:  make(chan clientRequest),
-		shutdown:         make(chan struct{}),
-		otherNodeIds:     otherNodeIds,
 		requestVoteRpc:   make(chan requestVoteRpcCall),
 		appendEntriesRpc: make(chan appendEntriesRpcCall),
 		nextIndex:        make(map[NodeId]int),
 		matchIndex:       make(map[NodeId]int),
-		logger:           log.Default(),
+		logger:           log.New(log.Writer(), log.Prefix(), log.Flags()),
 	}
 }
 
@@ -153,11 +152,15 @@ func (n *Node) setVotesHave(value int) {
 }
 
 func (n *Node) Shutdown(ctx context.Context) {
-	n.shutdown <- struct{}{}
-	close(n.shutdown)
+	if n.State() == Dead {
+		return
+	}
+	n.logger.Print("shutting down")
 	if err := n.httpServer.Shutdown(ctx); err != nil {
 		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
+	n.shutdown <- struct{}{}
+	close(n.shutdown)
 }
 
 func (n *Node) ClientCommand(ctx context.Context, command []byte) {
@@ -173,18 +176,30 @@ func (n *Node) ClientCommand(ctx context.Context, command []byte) {
 }
 
 func (n *Node) Run() {
-	go func() {
-		if err := n.runServer(); err != nil {
-			log.Printf("could not run node server: %s", err.Error())
-			n.Shutdown(context.Background())
-		}
-	}()
+	if n.State() != Dead {
+		n.logger.Print("already running")
+		return
+	}
+	if err := n.runServer(); err != nil {
+		n.logger.Printf("could not run node server: %s", err.Error())
+		n.Shutdown(context.Background())
+	}
+	n.mu.Lock()
+	n.state = Follower
+	n.shutdown = make(chan struct{})
 	n.votedFor = EmptyId
-	n.electionTimer = time.NewTimer(generateElectionTimeout())
 
+	n.electionTimer = time.NewTimer(generateElectionTimeout())
+	defer n.electionTimer.Stop()
 	n.heartbeatTimer = time.NewTimer(heartbeatPeriod)
+	defer n.heartbeatTimer.Stop()
 	n.heartbeatTimer.Stop()
+
+	n.mu.Unlock()
+	n.logger.Print("starting event loop")
 	n.eventLoop()
+	n.logger.Print("stopped event loop")
+	n.setState(Dead)
 }
 
 type appendEntriesFollowerResult struct {
@@ -196,17 +211,18 @@ type appendEntriesFollowerResult struct {
 
 func (n *Node) eventLoop() {
 	requestVoteResponse := make(chan RequestVoteResult)
+	defer close(requestVoteResponse)
 	heartbeatResponse := make(chan AppendEntriesResult)
+	defer close(heartbeatResponse)
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
-	run := atomic.Bool{}
-	run.Store(true)
-	go func() {
-		<-n.shutdown
-		run.Store(false)
-	}()
+	defer close(appendEntriesResponse)
 
-	for run.Load() {
+eventLoop:
+	for {
 		select {
+		case <-n.shutdown:
+			n.logger.Print("shut down event loop")
+			break eventLoop
 		case appendEntries := <-n.appendEntriesRpc:
 			// Receiver implementation:
 			// 1. Reply false if term < currentTerm (§5.1)
@@ -218,7 +234,7 @@ func (n *Node) eventLoop() {
 			if appendEntries.data.Term >= n.CurrentTerm() {
 				n.setCurrentTerm(appendEntries.data.Term)
 				n.becomeFollower()
-				response.Success = true
+				// response.Success = true // TODO?
 			}
 			if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
 				newCommit := appendEntries.data.LeaderCommit
@@ -232,16 +248,18 @@ func (n *Node) eventLoop() {
 					if ok {
 						if lastEntry.Term == appendEntries.data.PrevLogTerm {
 							response.Success = true
-							n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-							n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
+							logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+							// TODO this may repeat again and again
+							n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
 						} else {
 							n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
 						}
 					}
 				} else {
 					response.Success = true
-					n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-					n.logger.Printf("Replicated %d entries on a Follower.", len(appendEntries.data.Entries))
+					logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+					// TODO this may repeat again and again
+					n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
 				}
 			}
 			response.Term = n.CurrentTerm()
@@ -270,7 +288,7 @@ func (n *Node) eventLoop() {
 					n.dlog("issuing RequestVote to %s", n.otherNodeIds[i])
 					result, err := n.issueRequestVote(context.Background(), nodeHost)
 					if err != nil {
-						n.dlog("could not issue RequestVote to %s: %s", nodeHost, err.Error())
+						n.dlog("could not issue RequestVote to %s: %s", n.otherNodeIds[i], err.Error())
 					} else {
 						requestVoteResponse <- result
 					}
@@ -305,9 +323,11 @@ func (n *Node) eventLoop() {
 				go func() {
 					result, err := n.issueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), nodeHost)
 					if err != nil {
-						n.dlog("could not issue heartbeat to %s: %s", nodeHost, err.Error())
+						n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
 					} else {
-						heartbeatResponse <- result
+						select {
+						case heartbeatResponse <- result:
+						}
 					}
 				}()
 			}
@@ -334,20 +354,41 @@ func (n *Node) eventLoop() {
 				n.logger.Printf("Agreed with %s", appendEntriesResult.id)
 				n.nextIndex[appendEntriesResult.id] += len(appendEntriesResult.request.Entries)
 				n.matchIndex[appendEntriesResult.id] = n.nextIndex[appendEntriesResult.id] - 1
-				matchCount := 1
-				commitIndex := n.StateMachine.CommitIndex()
-				for _, peerId := range n.otherNodeIds {
-					if n.matchIndex[peerId] > commitIndex {
-						matchCount++
+				savedCommitIndex := n.StateMachine.CommitIndex()
+				for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
+					if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
+						matchCount := 1
+						for _, peerId := range n.otherNodeIds {
+							if n.matchIndex[peerId] >= i {
+								matchCount++
+							}
+						}
+						if matchCount*2 > len(n.otherNodeIds)+1 {
+							n.StateMachine.SetCommitIndex(i)
+						}
 					}
 				}
-				if matchCount*2 > len(n.otherNodeIds)+1 {
-					commitIndex += len(appendEntriesResult.request.Entries)
-					n.logger.Printf("set CommitIndex = %d", commitIndex)
-					n.StateMachine.SetCommitIndex(commitIndex)
-					n.StateMachine.Apply(commitIndex)
-					appendEntriesResult.client <- commitIndex
+				if n.StateMachine.CommitIndex() > savedCommitIndex {
+					n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
+					n.StateMachine.Apply(n.StateMachine.CommitIndex())
+					appendEntriesResult.client <- n.StateMachine.CommitIndex()
 				}
+				// matchCount := 1
+				// commitIndex := n.StateMachine.CommitIndex()
+				// for _, peerId := range n.otherNodeIds {
+				// 	if n.matchIndex[peerId] >= commitIndex {
+				// 		matchCount++
+				// 	}
+				// }
+				// if matchCount*2 > len(n.nodes) {
+				// 	commitIndex += len(appendEntriesResult.request.Entries)
+				// 	if commitIndex > appendEntriesResult.request.LogIndex {
+				// 		n.logger.Printf("set CommitIndex = %d", commitIndex)
+				// 		n.StateMachine.SetCommitIndex(commitIndex)
+				// 	}
+				// 	n.StateMachine.Apply(n.StateMachine.CommitIndex())
+				// 	appendEntriesResult.client <- n.StateMachine.CommitIndex()
+				// }
 			} else {
 				n.mu.Lock()
 				n.nextIndex[appendEntriesResult.id]--
@@ -357,7 +398,7 @@ func (n *Node) eventLoop() {
 					appendEntries := n.makeAppendEntries(appendEntriesResult.id)
 					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
 					if err != nil {
-						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						n.logger.Printf("could not reissue AppendEntries to %s: %s", appendEntriesResult.id, err.Error())
 					} else {
 						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}
 					}
@@ -369,7 +410,7 @@ func (n *Node) eventLoop() {
 				req.commited <- 1
 				break
 			}
-			n.logger.Printf("Incoming request: %s", req.cmd)
+			n.logger.Printf("Client request: %s", req.cmd)
 			n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				nodeHost := n.nodes[id]
@@ -377,7 +418,7 @@ func (n *Node) eventLoop() {
 					appendEntries := n.makeAppendEntries(id)
 					result, err := n.issueAppendEntries(context.Background(), appendEntries, nodeHost)
 					if err != nil {
-						n.logger.Printf("could not issue AppendEntries to %s: %s", nodeHost, err.Error())
+						n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
 					} else {
 						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.commited, id}
 					}
@@ -416,6 +457,7 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 		Entries:      entries,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
+		LogIndex:     n.StateMachine.Len() - 1,
 	}
 }
 
@@ -578,10 +620,13 @@ func (n *Node) runServer() error {
 	host := n.nodes[n.Id]
 	n.logger.Printf("Running HTTP server at %v", host)
 	n.httpServer = &http.Server{Addr: host, Handler: handler}
-	err := n.httpServer.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		err = nil
+
+	addr := host
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
+	go n.httpServer.Serve(ln)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package raft_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -118,6 +119,7 @@ func TestKeyValueReplication(t *testing.T) {
 	asserts.Len(t, 2, roles[Follower])
 	asserts.Len(t, 1, roles[Leader])
 	asserts.Len(t, 0, roles[Candidate])
+	t.Log("cluster is set up")
 
 	leader := roles[Leader][0]
 	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -128,16 +130,16 @@ func TestKeyValueReplication(t *testing.T) {
 	waitABit()
 	for id := range nodes {
 		value, ok := kvs[id].Get("x")
+		asserts.EqualEx(fmt.Sprintf("%s expected to have x=3", id), t, "3", string(value))
 		asserts.True(t, ok)
-		asserts.Equal(t, "3", string(value))
 	}
 
 	nodeStructs[leader].Shutdown(t.Context())
 	waitABit()
 	for _, id := range roles[Follower] {
 		value, ok := kvs[id].Get("x")
+		asserts.EqualEx(fmt.Sprintf("%s expected to have x=3", id), t, "3", string(value))
 		asserts.True(t, ok)
-		asserts.Equal(t, "3", string(value))
 	}
 
 	leaderIsBack := nodeStructs[leader]
