@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	. "raft"
-	"raft/pkg/asserts"
-	"raft/storage"
+	. "github.com/homeakuzin/raft"
+	"github.com/homeakuzin/raft/pkg/asserts"
+	"github.com/homeakuzin/raft/storage"
 )
 
 // TODO it sometimes blocks indefinitely

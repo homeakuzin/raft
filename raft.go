@@ -325,9 +325,7 @@ eventLoop:
 					if err != nil {
 						n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
 					} else {
-						select {
-						case heartbeatResponse <- result:
-						}
+						heartbeatResponse <- result
 					}
 				}()
 			}
