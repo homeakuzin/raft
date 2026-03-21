@@ -21,12 +21,12 @@ type showcaseHandler struct {
 }
 
 type nodeStatus struct {
-	Id           int
-	Name         string
-	State        string
-	Term         int
-	Commit       int
-	LastLogIndex int
+	Id          int
+	Name        string
+	State       string
+	Term        int
+	Commits     int
+	CommitIndex int
 }
 
 type clusterStatus struct {

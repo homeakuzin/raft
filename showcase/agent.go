@@ -87,8 +87,8 @@ func (a agent) statusHandler(w http.ResponseWriter, r *http.Request) {
 		a.node.Id.String(),
 		a.node.State().String(),
 		a.node.CurrentTerm(),
+		a.node.StateMachine.Len(),
 		a.node.StateMachine.CommitIndex(),
-		a.node.StateMachine.Len() - 1,
 	}
 	jsonBytes, err := json.Marshal(&status)
 	if err != nil {

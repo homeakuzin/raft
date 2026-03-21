@@ -222,6 +222,7 @@ eventLoop:
 		case <-n.shutdown:
 			n.logger.Print("shut down event loop")
 			break eventLoop
+
 		case appendEntries := <-n.appendEntriesRpc:
 			appendEntries.result <- n.appendEntriecRPC(appendEntries.data)
 		case requestVote := <-n.requestVoteRpc:
