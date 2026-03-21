@@ -1,4 +1,3 @@
 raft
 tmp/
-example/kv/kv
-example/showcase/showcase
+showcase/showcase

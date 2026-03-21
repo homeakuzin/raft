@@ -84,7 +84,7 @@ func runANode(nodes []showcaseNode) {
 		log.Fatalf("No node with id %d", *flagNodeId)
 	}
 
-	node := raft.NewNode(nodeId, peers, &storage.ListStorage{})
+	node := raft.NewNode(nodeId, peers, raft.HTTPTransport(nodeId, peers), &storage.ListStorage{})
 
 	agent := newAgent(node)
 	go func() {
