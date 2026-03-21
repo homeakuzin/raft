@@ -7,37 +7,37 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/homeakuzin/raft"
+	"github.com/homeakuzin/raft"
 	"github.com/homeakuzin/raft/pkg/asserts"
 	"github.com/homeakuzin/raft/storage"
 )
 
 type node struct {
-	n       *Node
+	n       *raft.Node
 	storage *storage.ListStorage
 }
 
 type cluster struct {
-	nodes map[NodeId]node
+	nodes map[raft.NodeId]node
 }
 
 func newCluster(ports []int) *cluster {
 	cluster := &cluster{}
-	cluster.nodes = make(map[NodeId]node)
-	peers := make(map[NodeId]string)
+	cluster.nodes = make(map[raft.NodeId]node)
+	peers := make(map[raft.NodeId]string)
 	for i, port := range ports {
-		peers[NodeId(i)] = fmt.Sprintf("127.0.0.1:%d", port)
+		peers[raft.NodeId(i)] = fmt.Sprintf("127.0.0.1:%d", port)
 	}
 	for i := range ports {
-		id := NodeId(i)
+		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
-		n := NewNode(id, peers, HTTPTransport(id, peers), storage).LogPrefixId()
+		n := raft.NewNode(id, peers, raft.HTTPTransport(id, peers), storage).LogPrefixId()
 		cluster.nodes[id] = node{n, storage}
 	}
 	return cluster
 }
 
-func (c *cluster) getNodes(state State) []node {
+func (c *cluster) getNodes(state raft.State) []node {
 	ns := make([]node, 0, len(c.nodes))
 	for _, n := range c.nodes {
 		if n.n.State() == state {
@@ -53,7 +53,7 @@ func (c *cluster) assertHealthy(t *testing.T) {
 	leaderLogs := leader.storage.Commands()
 	asserts.Len(t, leaderCommit+1, leaderLogs)
 
-	followers := c.getNodes(Follower)
+	followers := c.getNodes(raft.Follower)
 	asserts.Len(t, 2, followers)
 	for _, node := range followers {
 		c.assertFollower(t, node, leader)
@@ -84,9 +84,15 @@ func (c *cluster) command(t *testing.T, cmd []byte, node node) {
 }
 
 func (c *cluster) leader(t *testing.T) node {
-	leaders := c.getNodes(Leader)
+	leaders := c.getNodes(raft.Leader)
 	asserts.Len(t, 1, leaders)
 	return leaders[0]
+}
+
+func (c *cluster) setup(t *testing.T) {
+	c.run()
+	c.wait()
+	c.assertHealthy(t)
 }
 
 func (c *cluster) run() {
@@ -134,17 +140,38 @@ func TestRaft(t *testing.T) {
 		ports.ports = append(ports.ports, p)
 	}
 
+	t.Run("Cluster gives no shit when follower fails", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+
+		cluster.command(t, []byte{1}, cluster.leader(t))
+		cluster.wait()
+		cluster.assertHealthy(t)
+
+		followers := cluster.getNodes(raft.Follower)
+		failedFollower := followers[0]
+		failedFollower.n.Shutdown(t.Context())
+
+		leader := cluster.leader(t)
+		cluster.command(t, []byte{2}, leader)
+		cluster.command(t, []byte{3}, leader)
+		cluster.wait()
+		cluster.assertFollower(t, followers[1], leader)
+
+		go failedFollower.n.Run()
+		cluster.wait()
+		cluster.assertHealthy(t)
+	})
 	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
 		t.Parallel()
 		cluster := newCluster(ports.popPorts())
 		defer cluster.stop(t.Context())
-		cluster.run()
-		cluster.wait()
-		cluster.assertHealthy(t)
+		cluster.setup(t)
+
 		initialLeader := cluster.leader(t)
-
 		cluster.command(t, []byte{1}, initialLeader)
-
 		cluster.wait()
 		cluster.assertHealthy(t)
 
@@ -152,8 +179,8 @@ func TestRaft(t *testing.T) {
 		initialLeader.n.Shutdown(t.Context())
 		cluster.wait()
 
-		leaders := cluster.getNodes(Leader)
-		followers := cluster.getNodes(Follower)
+		leaders := cluster.getNodes(raft.Leader)
+		followers := cluster.getNodes(raft.Follower)
 		asserts.Len(t, 1, leaders)
 		asserts.Len(t, 1, followers)
 
@@ -166,7 +193,7 @@ func TestRaft(t *testing.T) {
 		cluster.wait()
 		cluster.assertFollower(t, followers[0], leaders[0])
 
-		dead := cluster.getNodes(Dead)
+		dead := cluster.getNodes(raft.Dead)
 		asserts.Len(t, 1, dead)
 		asserts.Equal(t, initialLeader, dead[0])
 
