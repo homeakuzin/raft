@@ -223,178 +223,20 @@ eventLoop:
 			n.logger.Print("shut down event loop")
 			break eventLoop
 		case appendEntries := <-n.appendEntriesRpc:
-			// Receiver implementation:
-			// 1. Reply false if term < currentTerm (§5.1)
-			// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-			// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-			// 4. Append any new entries not already in the log
-			// 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-			response := AppendEntriesResult{}
-			if appendEntries.data.Term >= n.CurrentTerm() {
-				n.setCurrentTerm(appendEntries.data.Term)
-				n.becomeFollower()
-				response.Success = true
-				if len(appendEntries.data.Entries) > 0 {
-					if appendEntries.data.PrevLogIndex > 0 {
-						lastEntry, ok := n.StateMachine.At(appendEntries.data.PrevLogIndex)
-						if ok {
-							if lastEntry.Term == appendEntries.data.PrevLogTerm {
-								response.Success = true
-								logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-								n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
-							} else {
-								response.Success = false
-								n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
-							}
-						}
-					} else {
-						response.Success = true
-						logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-						n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
-					}
-				}
-				if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
-					actualCommit := appendEntries.data.LeaderCommit
-					n.StateMachine.Apply(actualCommit)
-					n.StateMachine.SetCommitIndex(actualCommit)
-					n.logger.Printf("Applied commit index %d", actualCommit)
-				}
-			}
-			response.Term = n.CurrentTerm()
-			appendEntries.result <- response
+			appendEntries.result <- n.appendEntriecRPC(appendEntries.data)
 		case requestVote := <-n.requestVoteRpc:
-			// Receiver implementation:
-			// 1. Reply false if term < currentTerm (§5.1)
-			// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2,§5.4)
-			n.dlog("RequestVoteRPC from %s", requestVote.data.CandidateId)
-			response := RequestVoteResult{}
-			lastLog, lastIndex, ok := n.StateMachine.Last()
-			candidateUpToDate := !ok || lastIndex >= requestVote.data.LastLogIndex && lastLog.Term >= requestVote.data.LastLogTerm
-			if requestVote.data.Term > n.CurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
-				n.setCurrentTerm(requestVote.data.Term)
-				n.becomeFollower()
-				n.setVotedFor(requestVote.data.CandidateId)
-				response.VoteGranted = true
-			}
-			response.Term = n.CurrentTerm()
-			requestVote.result <- response
+			requestVote.result <- n.requestVoteRPC(requestVote.data)
 		case <-n.electionTimer.C:
-			n.becomeCandidate()
-			for _, id := range n.otherNodeIds {
-				go func() {
-					n.dlog("issuing RequestVote to %s", id)
-					result, err := n.transport.IssueRequestVote(context.Background(), RequestVote{
-						Term:        n.CurrentTerm(),
-						CandidateId: n.Id,
-					}, id)
-					if err != nil {
-						n.dlog("could not issue RequestVote to %s: %s", id, err.Error())
-					} else {
-						requestVoteResponse <- result
-					}
-				}()
-			}
+			n.startElection(requestVoteResponse)
 		case response := <-requestVoteResponse:
-			if state := n.State(); state != Candidate {
-				n.logger.Printf("Warning: got RequestVoteRPCResult in state %s", state)
-				break
-			}
-			if response.Term > n.CurrentTerm() {
-				n.setCurrentTerm(response.Term)
-				n.becomeFollower()
-				break
-			}
-			if response.VoteGranted {
-				// TODO: check vote source
-				votes := n.incrementVotesHave()
-				if votes*2 > len(n.nodes) {
-					n.becomeLeader()
-				}
-			}
+			n.onRequestVoteResponse(response)
 
 		case <-n.heartbeatTimer.C:
-			if state := n.State(); state != Leader {
-				n.logger.Printf("Warning: got heartbeatTimer tick in state %s", state)
-				break
-			}
-			appendEntriesCtx := context.Background()
-			for _, id := range n.otherNodeIds {
-				go func() {
-					appendEntries := n.makeAppendEntries(id)
-					result, err := n.transport.IssueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), id)
-					if err != nil {
-						n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
-					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, nil, id}
-					}
-				}()
-			}
+			n.sendHeartbeats(appendEntriesResponse)
 		case appendEntriesResult := <-appendEntriesResponse:
-			if state := n.State(); state != Leader {
-				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
-				break
-			}
-			if appendEntriesResult.result.Term > n.CurrentTerm() {
-				n.setCurrentTerm(appendEntriesResult.result.Term)
-				n.becomeFollower()
-				break
-			}
-			if appendEntriesResult.result.Success {
-				n.nextIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex + 1
-				n.matchIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex
-				if len(appendEntriesResult.request.Entries) > 0 {
-					savedCommitIndex := n.StateMachine.CommitIndex()
-					for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
-						if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
-							matchCount := 1
-							for _, peerId := range n.otherNodeIds {
-								if n.matchIndex[peerId] >= i {
-									matchCount++
-								}
-							}
-							if matchCount*2 > len(n.otherNodeIds)+1 {
-								n.StateMachine.SetCommitIndex(i)
-							}
-						}
-					}
-					if n.StateMachine.CommitIndex() > savedCommitIndex {
-						n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
-						n.StateMachine.Apply(n.StateMachine.CommitIndex())
-						appendEntriesResult.client <- n.StateMachine.CommitIndex()
-					}
-				}
-			} else {
-				n.mu.Lock()
-				n.nextIndex[appendEntriesResult.id]--
-				n.mu.Unlock()
-				go func() {
-					appendEntries := n.makeAppendEntries(appendEntriesResult.id)
-					result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, appendEntriesResult.id)
-					if err != nil {
-						n.logger.Printf("could not reissue AppendEntries to %s: %s", appendEntriesResult.id, err.Error())
-					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}
-					}
-				}()
-			}
+			n.onAppendEntriesResponse(appendEntriesResult, appendEntriesResponse)
 		case req := <-n.clientRequestCh:
-			if state := n.State(); state != Leader {
-				n.logger.Printf("Warning: got client request in state %s", state)
-				req.client <- 1
-				break
-			}
-			n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
-			for _, id := range n.otherNodeIds {
-				go func() {
-					appendEntries := n.makeAppendEntries(id)
-					result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, id)
-					if err != nil {
-						n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
-					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.client, id}
-					}
-				}()
-			}
+			n.onClientCommand(req, appendEntriesResponse)
 		}
 
 		switch n.State() {
@@ -406,6 +248,192 @@ eventLoop:
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
+}
+
+func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+	if state := n.State(); state != Leader {
+		n.logger.Printf("Warning: got client request in state %s", state)
+		req.client <- 1
+		return
+	}
+	n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
+	for _, id := range n.otherNodeIds {
+		go func() {
+			appendEntries := n.makeAppendEntries(id)
+			result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, id)
+			if err != nil {
+				n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
+			} else {
+				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.client, id}
+			}
+		}()
+	}
+}
+
+func (n *Node) onAppendEntriesResponse(appendEntriesResult appendEntriesFollowerResult, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+	if state := n.State(); state != Leader {
+		n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
+		return
+	}
+	if appendEntriesResult.result.Term > n.CurrentTerm() {
+		n.setCurrentTerm(appendEntriesResult.result.Term)
+		n.becomeFollower()
+		return
+	}
+	if appendEntriesResult.result.Success {
+		n.nextIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex + 1
+		n.matchIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex
+		if len(appendEntriesResult.request.Entries) > 0 {
+			savedCommitIndex := n.StateMachine.CommitIndex()
+			for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
+				if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
+					matchCount := 1
+					for _, peerId := range n.otherNodeIds {
+						if n.matchIndex[peerId] >= i {
+							matchCount++
+						}
+					}
+					if matchCount*2 > len(n.otherNodeIds)+1 {
+						n.StateMachine.SetCommitIndex(i)
+					}
+				}
+			}
+			if n.StateMachine.CommitIndex() > savedCommitIndex {
+				n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
+				n.StateMachine.Apply(n.StateMachine.CommitIndex())
+				appendEntriesResult.client <- n.StateMachine.CommitIndex()
+			}
+		}
+	} else {
+		n.mu.Lock()
+		n.nextIndex[appendEntriesResult.id]--
+		n.mu.Unlock()
+		go func() {
+			appendEntries := n.makeAppendEntries(appendEntriesResult.id)
+			result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, appendEntriesResult.id)
+			if err != nil {
+				n.logger.Printf("could not reissue AppendEntries to %s: %s", appendEntriesResult.id, err.Error())
+			} else {
+				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}
+			}
+		}()
+	}
+}
+
+func (n *Node) sendHeartbeats(appendEntriesResponse chan<- appendEntriesFollowerResult) {
+	if state := n.State(); state != Leader {
+		n.logger.Printf("Warning: got heartbeatTimer tick in state %s", state)
+		return
+	}
+	appendEntriesCtx := context.Background()
+	for _, id := range n.otherNodeIds {
+		go func() {
+			appendEntries := n.makeAppendEntries(id)
+			result, err := n.transport.IssueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), id)
+			if err != nil {
+				n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
+			} else {
+				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, nil, id}
+			}
+		}()
+	}
+}
+
+func (n *Node) onRequestVoteResponse(response RequestVoteResult) {
+	if state := n.State(); state != Candidate {
+		n.logger.Printf("Warning: got RequestVoteRPCResult in state %s", state)
+		return
+	}
+	if response.Term > n.CurrentTerm() {
+		n.setCurrentTerm(response.Term)
+		n.becomeFollower()
+		return
+	}
+	if response.VoteGranted {
+		// TODO: check vote source
+		votes := n.incrementVotesHave()
+		if votes*2 > len(n.nodes) {
+			n.becomeLeader()
+		}
+	}
+}
+
+func (n *Node) startElection(requestVoteResponse chan<- RequestVoteResult) {
+	n.becomeCandidate()
+	for _, id := range n.otherNodeIds {
+		go func() {
+			n.dlog("issuing RequestVote to %s", id)
+			result, err := n.transport.IssueRequestVote(context.Background(), RequestVote{
+				Term:        n.CurrentTerm(),
+				CandidateId: n.Id,
+			}, id)
+			if err != nil {
+				n.dlog("could not issue RequestVote to %s: %s", id, err.Error())
+			} else {
+				requestVoteResponse <- result
+			}
+		}()
+	}
+}
+
+// Receiver implementation:
+// 1. Reply false if term < currentTerm (§5.1)
+// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2,§5.4)
+func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
+	n.dlog("RequestVoteRPC from %s", requestVote.CandidateId)
+	response := RequestVoteResult{}
+	lastLog, lastIndex, ok := n.StateMachine.Last()
+	candidateUpToDate := !ok || lastIndex >= requestVote.LastLogIndex && lastLog.Term >= requestVote.LastLogTerm
+	if requestVote.Term > n.CurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
+		n.setCurrentTerm(requestVote.Term)
+		n.becomeFollower()
+		n.setVotedFor(requestVote.CandidateId)
+		response.VoteGranted = true
+	}
+	response.Term = n.CurrentTerm()
+	return response
+}
+
+// Receiver implementation:
+// 1. Reply false if term < currentTerm (§5.1)
+// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+// 4. Append any new entries not already in the log
+// 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult {
+	response := AppendEntriesResult{}
+	if appendEntries.Term >= n.CurrentTerm() {
+		n.setCurrentTerm(appendEntries.Term)
+		n.becomeFollower()
+		response.Success = true
+		if len(appendEntries.Entries) > 0 {
+			if appendEntries.PrevLogIndex > 0 {
+				lastEntry, ok := n.StateMachine.At(appendEntries.PrevLogIndex)
+				if ok {
+					if lastEntry.Term == appendEntries.PrevLogTerm {
+						response.Success = true
+						logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
+						n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.Entries), logs)
+					} else {
+						response.Success = false
+						n.StateMachine.DeleteFrom(appendEntries.PrevLogIndex)
+					}
+				}
+			} else {
+				response.Success = true
+				logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
+				n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.Entries), logs)
+			}
+		}
+		if appendEntries.LeaderCommit > n.StateMachine.CommitIndex() {
+			actualCommit := appendEntries.LeaderCommit
+			n.StateMachine.Apply(actualCommit)
+			n.StateMachine.SetCommitIndex(actualCommit)
+			n.logger.Printf("Applied commit index %d", actualCommit)
+		}
+	}
+	response.Term = n.CurrentTerm()
+	return response
 }
 
 func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
