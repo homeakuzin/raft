@@ -3,6 +3,7 @@ package raft_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,147 +12,154 @@ import (
 	"github.com/homeakuzin/raft/storage"
 )
 
-// TODO it sometimes blocks indefinitely
-func TestConsensys(t *testing.T) {
-	nodes := map[NodeId]string{
-		1: "localhost:5010",
-		2: "localhost:5011",
-		3: "localhost:5012",
+type node struct {
+	n       *Node
+	storage *storage.ListStorage
+}
+
+type cluster struct {
+	nodes map[NodeId]node
+}
+
+func newCluster(ports []int) *cluster {
+	cluster := &cluster{}
+	cluster.nodes = make(map[NodeId]node)
+	peers := make(map[NodeId]string)
+	for i, port := range ports {
+		peers[NodeId(i)] = fmt.Sprintf("127.0.0.1:%d", port)
 	}
-
-	kv1 := storage.NewKVStorage()
-	kv2 := storage.NewKVStorage()
-	kv3 := storage.NewKVStorage()
-
-	n1 := NewNode(1, nodes, HTTPTransport(1, nodes), kv1).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes, HTTPTransport(2, nodes), kv2).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes, HTTPTransport(3, nodes), kv3).LogPrefixId() //.Verbose()
-	nodeStructs := map[NodeId]*Node{
-		1: n1,
-		2: n2,
-		3: n3,
+	for i := range ports {
+		id := NodeId(i)
+		storage := &storage.ListStorage{}
+		n := NewNode(id, peers, HTTPTransport(id, peers), storage).LogPrefixId()
+		cluster.nodes[id] = node{n, storage}
 	}
-	go n1.Run()
-	go n2.Run()
-	go n3.Run()
-	waitABit()
-	roles := map[State][]NodeId{
-		Leader:    {},
-		Follower:  {},
-		Candidate: {},
-	}
-	roles[n1.State()] = append(roles[n1.State()], 1)
-	roles[n2.State()] = append(roles[n2.State()], 2)
-	roles[n3.State()] = append(roles[n3.State()], 3)
-	asserts.Len(t, 2, roles[Follower])
-	asserts.Len(t, 1, roles[Leader])
-	asserts.Len(t, 0, roles[Candidate])
-	firstTerm := n1.CurrentTerm()
-	asserts.True(t, firstTerm > 0)
-	asserts.Equal(t, firstTerm, n2.CurrentTerm())
-	asserts.Equal(t, firstTerm, n3.CurrentTerm())
+	return cluster
+}
 
-	firstEverLeader := roles[Leader][0]
-	nodeStructs[firstEverLeader].Shutdown(t.Context())
-	waitABit()
-
-	var newLeaderTerm int
-	var followerTerm int
-	for _, id := range roles[Follower] {
-		node := nodeStructs[id]
-		if node.State() == Leader {
-			newLeaderTerm = node.CurrentTerm()
-		} else if node.State() == Follower {
-			followerTerm = node.CurrentTerm()
-		} else if node.State() == Candidate {
-			t.Log("expected two nodes to be Leader and Follower, but have Candidate")
-			t.Fail()
+func (c *cluster) getNodes(state State) []node {
+	ns := make([]node, 0, len(c.nodes))
+	for _, n := range c.nodes {
+		if n.n.State() == state {
+			ns = append(ns, n)
 		}
 	}
-	asserts.NotEqual(t, 0, newLeaderTerm)
-	asserts.NotEqual(t, 0, followerTerm)
-	secondTerm := newLeaderTerm
-	asserts.True(t, secondTerm > firstTerm)
-	asserts.Equal(t, secondTerm, followerTerm)
-
-	leaderIsBack := nodeStructs[firstEverLeader]
-	go leaderIsBack.Run()
-	waitABit()
-	asserts.Equal(t, Follower, nodeStructs[firstEverLeader].State())
-	asserts.Equal(t, secondTerm, nodeStructs[firstEverLeader].CurrentTerm())
+	return ns
 }
 
-func TestKeyValueReplication(t *testing.T) {
-	nodes := map[NodeId]string{
-		1: "localhost:5020",
-		2: "localhost:5021",
-		3: "localhost:5022",
+func (c *cluster) run() {
+	for _, node := range c.nodes {
+		go node.n.Run()
 	}
-
-	kv1 := storage.NewKVStorage()
-	kv2 := storage.NewKVStorage()
-	kv3 := storage.NewKVStorage()
-	kvs := map[NodeId]*storage.KVStorage{
-		1: kv1,
-		2: kv2,
-		3: kv3,
-	}
-	n1 := NewNode(1, nodes, HTTPTransport(1, nodes), kv1).LogPrefixId() //.Verbose()
-	n2 := NewNode(2, nodes, HTTPTransport(2, nodes), kv2).LogPrefixId() //.Verbose()
-	n3 := NewNode(3, nodes, HTTPTransport(3, nodes), kv3).LogPrefixId() //.Verbose()
-	nodeStructs := map[NodeId]*Node{
-		1: n1,
-		2: n2,
-		3: n3,
-	}
-	go n1.Run()
-	go n2.Run()
-	go n3.Run()
-	waitABit()
-	roles := map[State][]NodeId{
-		Leader:    {},
-		Follower:  {},
-		Candidate: {},
-	}
-	roles[n1.State()] = append(roles[n1.State()], 1)
-	roles[n2.State()] = append(roles[n2.State()], 2)
-	roles[n3.State()] = append(roles[n3.State()], 3)
-	asserts.Len(t, 2, roles[Follower])
-	asserts.Len(t, 1, roles[Leader])
-	asserts.Len(t, 0, roles[Candidate])
-	t.Log("cluster is set up")
-
-	leader := roles[Leader][0]
-	timeout, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-
-	nodeStructs[leader].ClientCommand(timeout, []byte(`{"Action":0,"Key":"x","Value":"3"}`))
-
-	waitABit()
-	for id := range nodes {
-		value, ok := kvs[id].Get("x")
-		asserts.EqualEx(fmt.Sprintf("%s expected to have x=3", id), t, "3", string(value))
-		asserts.True(t, ok)
-	}
-
-	nodeStructs[leader].Shutdown(t.Context())
-	waitABit()
-	for _, id := range roles[Follower] {
-		value, ok := kvs[id].Get("x")
-		asserts.EqualEx(fmt.Sprintf("%s expected to have x=3", id), t, "3", string(value))
-		asserts.True(t, ok)
-	}
-
-	leaderIsBack := nodeStructs[leader]
-	go leaderIsBack.Run()
-	waitABit()
-
-	value, ok := kvs[leader].Get("x")
-	asserts.True(t, ok)
-	asserts.Equal(t, "3", string(value))
 }
 
-// TODO listen to some kind of event maybe?
-func waitABit() {
-	time.Sleep(time.Second)
+func (c *cluster) stop(ctx context.Context) {
+	for _, node := range c.nodes {
+		node.n.Shutdown(ctx)
+	}
+}
+
+func (s *cluster) wait() {
+	time.Sleep(time.Millisecond * 500)
+}
+
+type portsStack struct {
+	sync.Mutex
+	ports []int
+}
+
+func (s *portsStack) popPorts() []int {
+	return s.popPortsN(3)
+}
+
+func (s *portsStack) popPortsN(n int) []int {
+	s.Lock()
+	defer s.Unlock()
+	if n > len(s.ports) {
+		panic(fmt.Sprintf("popPorts: tried to pop %d ports but only have %d", n, len(s.ports)))
+	}
+	popped := s.ports[:n]
+	s.ports = s.ports[n:]
+	return popped
+}
+
+func TestRaft(t *testing.T) {
+	ports := portsStack{}
+	startPort := 30000
+	nPorts := 3000
+	ports.ports = make([]int, 0, nPorts)
+	for p := startPort; p < startPort+nPorts; p++ {
+		ports.ports = append(ports.ports, p)
+	}
+
+	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.run()
+		cluster.wait()
+		leaders := cluster.getNodes(Leader)
+		followers := cluster.getNodes(Follower)
+		asserts.Len(t, 1, leaders)
+		asserts.Len(t, 2, followers)
+
+		initialLeader := leaders[0]
+		initialTerm := initialLeader.n.CurrentTerm()
+		asserts.Equal(t, initialTerm, followers[0].n.CurrentTerm())
+		asserts.Equal(t, initialTerm, followers[1].n.CurrentTerm())
+
+		firstCommand := []byte{1}
+		initialLeader.n.ClientCommand(t.Context(), firstCommand)
+		commitIndex := 0
+		asserts.Equal(t, commitIndex, initialLeader.n.StateMachine.CommitIndex())
+		cmds := initialLeader.storage.Commands()
+		asserts.Len(t, 1, cmds)
+		asserts.Slice(t, firstCommand, cmds[0])
+
+		cluster.wait()
+		for i := 0; i < 2; i++ {
+			asserts.Equal(t, commitIndex, initialLeader.n.StateMachine.CommitIndex())
+			cmds := initialLeader.storage.Commands()
+			asserts.Len(t, 1, cmds)
+			asserts.Slice(t, firstCommand, cmds[0])
+		}
+
+		initialLeader.n.Shutdown(t.Context())
+		cluster.wait()
+
+		leaders = cluster.getNodes(Leader)
+		followers = cluster.getNodes(Follower)
+		asserts.Len(t, 1, leaders)
+		asserts.Len(t, 1, followers)
+
+		newTerm := leaders[0].n.CurrentTerm()
+		asserts.Gt(t, initialTerm, newTerm)
+		asserts.Equal(t, newTerm, followers[0].n.CurrentTerm())
+
+		secondCommand := []byte{2}
+		leaders[0].n.ClientCommand(t.Context(), secondCommand)
+		secondCommitIndex := 1
+		asserts.Equal(t, secondCommitIndex, leaders[0].n.StateMachine.CommitIndex())
+		cmds = leaders[0].storage.Commands()
+		asserts.Len(t, 2, cmds)
+		asserts.Slice(t, secondCommand, cmds[1])
+		cluster.wait()
+		asserts.Equal(t, secondCommitIndex, followers[0].n.StateMachine.CommitIndex())
+		cmds = followers[0].storage.Commands()
+		asserts.Len(t, 2, cmds)
+		asserts.Slice(t, secondCommand, cmds[1])
+
+		dead := cluster.getNodes(Dead)
+		asserts.Len(t, 1, dead)
+		asserts.Equal(t, initialLeader, dead[0])
+
+		go initialLeader.n.Run()
+		cluster.wait()
+		initialLeaderNewTerm := initialLeader.n.CurrentTerm()
+		asserts.Equal(t, newTerm, initialLeaderNewTerm)
+		asserts.Equal(t, secondCommitIndex, initialLeader.n.StateMachine.CommitIndex())
+		cmds = initialLeader.storage.Commands()
+		asserts.Len(t, 2, cmds)
+		asserts.Slice(t, secondCommand, cmds[1])
+	})
 }

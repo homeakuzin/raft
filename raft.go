@@ -29,10 +29,11 @@ type appendEntriesRpcCall struct {
 }
 
 type clientRequest struct {
-	cmd      []byte
-	commited chan int
+	cmd    []byte
+	client chan int
 }
 
+// TODO return errors from exposed functions as user may be dumb
 type Node struct {
 	Id               NodeId
 	transport        Transport
@@ -160,26 +161,28 @@ func (n *Node) Shutdown(ctx context.Context) {
 	close(n.shutdown)
 }
 
+// Blocks until majority of the cluster agrees on a command
 func (n *Node) ClientCommand(ctx context.Context, command []byte) {
+	n.logger.Printf("incoming command (%d bytes)", len(command))
 	ur := clientRequest{
 		command,
 		make(chan int),
 	}
 	select {
 	case n.clientRequestCh <- ur:
-		<-ur.commited
+		<-ur.client
 	case <-ctx.Done():
 	}
 }
 
-func (n *Node) Run() {
+func (n *Node) Run() error {
 	if n.State() != Dead {
 		n.logger.Print("already running")
-		return
+		return nil
 	}
 	if err := n.transport.Serve(n); err != nil {
 		n.logger.Printf("could not run node server: %s", err.Error())
-		n.Shutdown(context.Background())
+		return err
 	}
 	n.mu.Lock()
 	n.state = Follower
@@ -197,6 +200,7 @@ func (n *Node) Run() {
 	n.eventLoop()
 	n.logger.Print("stopped event loop")
 	n.setState(Dead)
+	return nil
 }
 
 type appendEntriesFollowerResult struct {
@@ -402,7 +406,7 @@ eventLoop:
 		case req := <-n.clientRequestCh:
 			if state := n.State(); state != Leader {
 				n.logger.Printf("Warning: got client request in state %s", state)
-				req.commited <- 1
+				req.client <- 1
 				break
 			}
 			n.logger.Printf("Client request: %s", req.cmd)
@@ -414,7 +418,7 @@ eventLoop:
 					if err != nil {
 						n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
 					} else {
-						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.commited, id}
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.client, id}
 					}
 				}()
 			}

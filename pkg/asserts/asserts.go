@@ -91,6 +91,34 @@ func Equal[T comparable](t testing.TB, expected, actual T) {
 	}
 }
 
+func Gt(t testing.TB, expected, actual int) {
+	t.Helper()
+	if actual <= expected {
+		t.Fatalf("expected %v to be greater than %v", actual, expected)
+	}
+}
+
+func Gte(t testing.TB, expected, actual int) {
+	t.Helper()
+	if actual < expected {
+		t.Fatalf("expected %v to be greater than or equal %v", actual, expected)
+	}
+}
+
+func Lt(t testing.TB, expected, actual int) {
+	t.Helper()
+	if actual >= expected {
+		t.Fatalf("expected %v to be less than %v", actual, expected)
+	}
+}
+
+func Lte(t testing.TB, expected, actual int) {
+	t.Helper()
+	if actual > expected {
+		t.Fatalf("expected %v to be less than or equal %v", actual, expected)
+	}
+}
+
 func HasKey[T comparable, E any](t testing.TB, key T, in map[T]E) {
 	t.Helper()
 	if _, ok := in[key]; !ok {

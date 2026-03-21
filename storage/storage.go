@@ -79,3 +79,9 @@ func (s *ListStorage) ApplyCommand(command []byte) {
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, command)
 }
+
+func (s *ListStorage) Commands() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commands
+}

@@ -4,7 +4,7 @@
 
 **Test #1 - Initial Leader Election**
 
-Verify that a cluster of 5 nodes can elect a leader when started. All nodes begin as followers, and within a reasonable timeout period, exactly one node becomes leader and the others recognize it.
+Verify that a cluster of 3 nodes can elect a leader when started. All nodes begin as followers, and within a reasonable timeout period, exactly one node becomes leader and the others recognize it.
 
 **Test #2 - Election Timeout Ranges**
 
@@ -20,7 +20,7 @@ Verify that nodes persist their vote for a given term. Once a node votes for a c
 
 **Test #5 - Majority Requirement**
 
-Confirm that a candidate only becomes leader if it receives votes from a majority of the cluster (3 out of 5 nodes). If it receives only 2 votes, it should remain a candidate or revert to follower.
+Confirm that a candidate only becomes leader if it receives votes from a majority of the cluster (2 out of 3 nodes). If it receives only 2 votes, it should remain a candidate or revert to follower.
 
 **Test #6 - Split Vote Resolution**
 
@@ -101,7 +101,7 @@ Test the process of adding one new server to a 3-node cluster, resulting in a 4-
 
 **Test #23 - Single Server Removal**
 
-Remove one server from a 5-node cluster, resulting in a 4-node cluster. Verify that the cluster maintains consensus and no disruption occurs.
+Remove one server from a 3-node cluster, resulting in a 2-node cluster. Verify that the cluster maintains consensus and no disruption occurs.
 
 **Test #24 - Joint Consensus Configuration**
 
@@ -131,11 +131,11 @@ After installing a snapshot, verify that the node's log and state machine remain
 
 **Test #29 - Minority Failure Tolerance**
 
-Kill two nodes in a 5-node cluster. Verify that the remaining three nodes can continue to elect a leader and process requests.
+Kill two nodes in a 3-node cluster. Verify that the remaining one cannot elect a leader or commit entries. When nodes recover, verify that the cluster returns to normal operation.
 
 **Test #30 - Majority Failure Recovery**
 
-Kill three nodes in a 5-node cluster. Verify that the remaining two cannot elect a leader or commit entries. When nodes recover, verify that the cluster returns to normal operation.
+Kill one node in a 3-node cluster. Verify that the remaining two cannot elect a leader or commit entries. When nodes recover, verify that the cluster returns to normal operation.
 
 **Test #31 - Leader Step-Down on Higher Term**
 

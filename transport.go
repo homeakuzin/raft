@@ -34,14 +34,14 @@ type httpTransport struct {
 }
 
 func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string) Transport {
-	return httpTransport{id: id, nodeAddrs: nodeAddrs, logger: log.Default()}
+	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: log.Default()}
 }
 
-func (t httpTransport) Shutdown(ctx context.Context) error {
-	return nil
+func (t *httpTransport) Shutdown(ctx context.Context) error {
+	return t.server.Shutdown(ctx)
 }
 
-func (t httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, node *Node) {
+func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, node *Node) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		t.logger.Printf("could not read body: %s", err.Error())
@@ -70,7 +70,7 @@ func (t httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (t httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Request, node *Node) {
+func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Request, node *Node) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		t.logger.Printf("could not read body: %s", err.Error())
@@ -99,7 +99,7 @@ func (t httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (t httpTransport) Serve(node *Node) error {
+func (t *httpTransport) Serve(node *Node) error {
 	handler := http.NewServeMux()
 	handler.HandleFunc("POST /rpc/request-vote", func(w http.ResponseWriter, r *http.Request) {
 		t.handlerRequestVote(w, r, node)
@@ -120,7 +120,7 @@ func (t httpTransport) Serve(node *Node) error {
 	return nil
 }
 
-func (t httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, node NodeId) (result RequestVoteResult, err error) {
+func (t *httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, node NodeId) (result RequestVoteResult, err error) {
 	body, err := json.Marshal(&data)
 	if err != nil {
 		return
@@ -151,7 +151,7 @@ func (t httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, n
 	return
 }
 
-func (t httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntries, node NodeId) (AppendEntriesResult, error) {
+func (t *httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntries, node NodeId) (AppendEntriesResult, error) {
 	var result AppendEntriesResult
 	body, err := json.Marshal(&data)
 	if err != nil {
