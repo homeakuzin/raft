@@ -34,7 +34,7 @@ type httpTransport struct {
 }
 
 func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string) Transport {
-	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: log.Default()}
+	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: log.New(log.Writer(), fmt.Sprintf("[%s] ", id), log.Flags())}
 }
 
 func (t *httpTransport) Shutdown(ctx context.Context) error {

@@ -82,6 +82,9 @@ func (m *StateMachine) DeleteFrom(from int) {
 func (m *StateMachine) NextEntriesForFollower(from int) []Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if from < 0 {
+		return nil
+	}
 	return m.logs[from:]
 }
 

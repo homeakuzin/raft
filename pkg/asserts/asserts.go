@@ -67,7 +67,9 @@ func Slice[E comparable](t testing.TB, expected, actual []E) {
 
 func Len[E any](t testing.TB, expected int, actual []E) {
 	t.Helper()
-	Equal(t, expected, len(actual))
+	if len(actual) != expected {
+		t.Fatalf("expected %v to contain %v elements", actual, expected)
+	}
 }
 
 func NotEqual[T comparable](t testing.TB, expected, actual T) {

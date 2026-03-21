@@ -213,8 +213,6 @@ type appendEntriesFollowerResult struct {
 func (n *Node) eventLoop() {
 	requestVoteResponse := make(chan RequestVoteResult)
 	defer close(requestVoteResponse)
-	heartbeatResponse := make(chan AppendEntriesResult)
-	defer close(heartbeatResponse)
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
 	defer close(appendEntriesResponse)
 
@@ -230,37 +228,36 @@ eventLoop:
 			// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 			// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 			// 4. Append any new entries not already in the log
-			// TODO 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+			// 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 			response := AppendEntriesResult{}
 			if appendEntries.data.Term >= n.CurrentTerm() {
 				n.setCurrentTerm(appendEntries.data.Term)
 				n.becomeFollower()
-				// response.Success = true // TODO?
-			}
-			if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
-				newCommit := appendEntries.data.LeaderCommit
-				n.StateMachine.Apply(newCommit)
-				n.StateMachine.SetCommitIndex(newCommit)
-				n.logger.Printf("Applied commit index %d", newCommit)
-			}
-			if len(appendEntries.data.Entries) > 0 {
-				if appendEntries.data.PrevLogIndex > 0 {
-					lastEntry, ok := n.StateMachine.At(appendEntries.data.PrevLogIndex)
-					if ok {
-						if lastEntry.Term == appendEntries.data.PrevLogTerm {
-							response.Success = true
-							logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-							// TODO this may repeat again and again
-							n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
-						} else {
-							n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
+				response.Success = true
+				if len(appendEntries.data.Entries) > 0 {
+					if appendEntries.data.PrevLogIndex > 0 {
+						lastEntry, ok := n.StateMachine.At(appendEntries.data.PrevLogIndex)
+						if ok {
+							if lastEntry.Term == appendEntries.data.PrevLogTerm {
+								response.Success = true
+								logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+								n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
+							} else {
+								response.Success = false
+								n.StateMachine.DeleteFrom(appendEntries.data.PrevLogIndex)
+							}
 						}
+					} else {
+						response.Success = true
+						logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
+						n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
 					}
-				} else {
-					response.Success = true
-					logs := n.StateMachine.AppendLogs(appendEntries.data.Entries...)
-					// TODO this may repeat again and again
-					n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.data.Entries), logs)
+				}
+				if appendEntries.data.LeaderCommit > n.StateMachine.CommitIndex() {
+					actualCommit := appendEntries.data.LeaderCommit
+					n.StateMachine.Apply(actualCommit)
+					n.StateMachine.SetCommitIndex(actualCommit)
+					n.logger.Printf("Applied commit index %d", actualCommit)
 				}
 			}
 			response.Term = n.CurrentTerm()
@@ -323,22 +320,14 @@ eventLoop:
 			appendEntriesCtx := context.Background()
 			for _, id := range n.otherNodeIds {
 				go func() {
+					appendEntries := n.makeAppendEntries(id)
 					result, err := n.transport.IssueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), id)
 					if err != nil {
 						n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
 					} else {
-						heartbeatResponse <- result
+						appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, nil, id}
 					}
 				}()
-			}
-		case heartbeat := <-heartbeatResponse:
-			if state := n.State(); state != Leader {
-				n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
-				break
-			}
-			if heartbeat.Term > n.CurrentTerm() {
-				n.setCurrentTerm(heartbeat.Term)
-				n.becomeFollower()
 			}
 		case appendEntriesResult := <-appendEntriesResponse:
 			if state := n.State(); state != Leader {
@@ -351,44 +340,29 @@ eventLoop:
 				break
 			}
 			if appendEntriesResult.result.Success {
-				n.logger.Printf("Agreed with %s", appendEntriesResult.id)
-				n.nextIndex[appendEntriesResult.id] += len(appendEntriesResult.request.Entries)
-				n.matchIndex[appendEntriesResult.id] = n.nextIndex[appendEntriesResult.id] - 1
-				savedCommitIndex := n.StateMachine.CommitIndex()
-				for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
-					if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
-						matchCount := 1
-						for _, peerId := range n.otherNodeIds {
-							if n.matchIndex[peerId] >= i {
-								matchCount++
+				n.nextIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex + 1
+				n.matchIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex
+				if len(appendEntriesResult.request.Entries) > 0 {
+					savedCommitIndex := n.StateMachine.CommitIndex()
+					for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
+						if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
+							matchCount := 1
+							for _, peerId := range n.otherNodeIds {
+								if n.matchIndex[peerId] >= i {
+									matchCount++
+								}
+							}
+							if matchCount*2 > len(n.otherNodeIds)+1 {
+								n.StateMachine.SetCommitIndex(i)
 							}
 						}
-						if matchCount*2 > len(n.otherNodeIds)+1 {
-							n.StateMachine.SetCommitIndex(i)
-						}
+					}
+					if n.StateMachine.CommitIndex() > savedCommitIndex {
+						n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
+						n.StateMachine.Apply(n.StateMachine.CommitIndex())
+						appendEntriesResult.client <- n.StateMachine.CommitIndex()
 					}
 				}
-				if n.StateMachine.CommitIndex() > savedCommitIndex {
-					n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
-					n.StateMachine.Apply(n.StateMachine.CommitIndex())
-					appendEntriesResult.client <- n.StateMachine.CommitIndex()
-				}
-				// matchCount := 1
-				// commitIndex := n.StateMachine.CommitIndex()
-				// for _, peerId := range n.otherNodeIds {
-				// 	if n.matchIndex[peerId] >= commitIndex {
-				// 		matchCount++
-				// 	}
-				// }
-				// if matchCount*2 > len(n.nodes) {
-				// 	commitIndex += len(appendEntriesResult.request.Entries)
-				// 	if commitIndex > appendEntriesResult.request.LogIndex {
-				// 		n.logger.Printf("set CommitIndex = %d", commitIndex)
-				// 		n.StateMachine.SetCommitIndex(commitIndex)
-				// 	}
-				// 	n.StateMachine.Apply(n.StateMachine.CommitIndex())
-				// 	appendEntriesResult.client <- n.StateMachine.CommitIndex()
-				// }
 			} else {
 				n.mu.Lock()
 				n.nextIndex[appendEntriesResult.id]--
@@ -409,7 +383,6 @@ eventLoop:
 				req.client <- 1
 				break
 			}
-			n.logger.Printf("Client request: %s", req.cmd)
 			n.StateMachine.AppendLogs(Entry{req.cmd, n.CurrentTerm()})
 			for _, id := range n.otherNodeIds {
 				go func() {
