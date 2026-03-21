@@ -12,6 +12,79 @@ import (
 	"github.com/homeakuzin/raft/storage"
 )
 
+func TestRaft(t *testing.T) {
+	ports := portsStack{}
+	startPort := 30000
+	nPorts := 3000
+	ports.ports = make([]int, 0, nPorts)
+	for p := startPort; p < startPort+nPorts; p++ {
+		ports.ports = append(ports.ports, p)
+	}
+
+	t.Run("Cluster gives no shit when follower fails", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+
+		cluster.command(t, []byte{1}, cluster.leader(t))
+		cluster.wait()
+		cluster.assertHealthy(t)
+
+		followers := cluster.getNodes(raft.Follower)
+		failedFollower := followers[0]
+		failedFollower.n.Shutdown(t.Context())
+
+		leader := cluster.leader(t)
+		cluster.command(t, []byte{2}, leader)
+		cluster.command(t, []byte{3}, leader)
+		cluster.wait()
+		cluster.assertFollower(t, followers[1], leader)
+
+		go failedFollower.n.Run()
+		cluster.wait()
+		cluster.assertHealthy(t)
+	})
+	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+
+		initialLeader := cluster.leader(t)
+		cluster.command(t, []byte{1}, initialLeader)
+		cluster.wait()
+		cluster.assertHealthy(t)
+
+		initialTerm := initialLeader.n.CurrentTerm()
+		initialLeader.n.Shutdown(t.Context())
+		cluster.wait()
+
+		leaders := cluster.getNodes(raft.Leader)
+		followers := cluster.getNodes(raft.Follower)
+		asserts.Len(t, 1, leaders)
+		asserts.Len(t, 1, followers)
+
+		newTerm := leaders[0].n.CurrentTerm()
+		asserts.Gt(t, initialTerm, newTerm)
+		cluster.assertFollower(t, followers[0], leaders[0])
+
+		cluster.command(t, []byte{2}, leaders[0])
+
+		cluster.wait()
+		cluster.assertFollower(t, followers[0], leaders[0])
+
+		dead := cluster.getNodes(raft.Dead)
+		asserts.Len(t, 1, dead)
+		asserts.Equal(t, initialLeader, dead[0])
+
+		go initialLeader.n.Run()
+		cluster.wait()
+
+		cluster.assertHealthy(t)
+	})
+}
+
 type node struct {
 	n       *raft.Node
 	storage *storage.ListStorage
@@ -129,77 +202,4 @@ func (s *portsStack) popPortsN(n int) []int {
 	popped := s.ports[:n]
 	s.ports = s.ports[n:]
 	return popped
-}
-
-func TestRaft(t *testing.T) {
-	ports := portsStack{}
-	startPort := 30000
-	nPorts := 3000
-	ports.ports = make([]int, 0, nPorts)
-	for p := startPort; p < startPort+nPorts; p++ {
-		ports.ports = append(ports.ports, p)
-	}
-
-	t.Run("Cluster gives no shit when follower fails", func(t *testing.T) {
-		t.Parallel()
-		cluster := newCluster(ports.popPorts())
-		defer cluster.stop(t.Context())
-		cluster.setup(t)
-
-		cluster.command(t, []byte{1}, cluster.leader(t))
-		cluster.wait()
-		cluster.assertHealthy(t)
-
-		followers := cluster.getNodes(raft.Follower)
-		failedFollower := followers[0]
-		failedFollower.n.Shutdown(t.Context())
-
-		leader := cluster.leader(t)
-		cluster.command(t, []byte{2}, leader)
-		cluster.command(t, []byte{3}, leader)
-		cluster.wait()
-		cluster.assertFollower(t, followers[1], leader)
-
-		go failedFollower.n.Run()
-		cluster.wait()
-		cluster.assertHealthy(t)
-	})
-	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
-		t.Parallel()
-		cluster := newCluster(ports.popPorts())
-		defer cluster.stop(t.Context())
-		cluster.setup(t)
-
-		initialLeader := cluster.leader(t)
-		cluster.command(t, []byte{1}, initialLeader)
-		cluster.wait()
-		cluster.assertHealthy(t)
-
-		initialTerm := initialLeader.n.CurrentTerm()
-		initialLeader.n.Shutdown(t.Context())
-		cluster.wait()
-
-		leaders := cluster.getNodes(raft.Leader)
-		followers := cluster.getNodes(raft.Follower)
-		asserts.Len(t, 1, leaders)
-		asserts.Len(t, 1, followers)
-
-		newTerm := leaders[0].n.CurrentTerm()
-		asserts.Gt(t, initialTerm, newTerm)
-		cluster.assertFollower(t, followers[0], leaders[0])
-
-		cluster.command(t, []byte{2}, leaders[0])
-
-		cluster.wait()
-		cluster.assertFollower(t, followers[0], leaders[0])
-
-		dead := cluster.getNodes(raft.Dead)
-		asserts.Len(t, 1, dead)
-		asserts.Equal(t, initialLeader, dead[0])
-
-		go initialLeader.n.Run()
-		cluster.wait()
-
-		cluster.assertHealthy(t)
-	})
 }
