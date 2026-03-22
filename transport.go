@@ -16,8 +16,13 @@ type RPCClient interface {
 	IssueAppendEntries(ctx context.Context, data AppendEntries, node NodeId) (AppendEntriesResult, error)
 }
 
+type RaftProtocol interface {
+	RequestVote(RequestVote) RequestVoteResult
+	AppendEntries(AppendEntries) AppendEntriesResult
+}
+
 type RPCServer interface {
-	Serve(node *Node) error
+	Serve(protocol RaftProtocol) error
 	Shutdown(ctx context.Context) error
 }
 
@@ -41,7 +46,7 @@ func (t *httpTransport) Shutdown(ctx context.Context) error {
 	return t.server.Shutdown(ctx)
 }
 
-func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, node *Node) {
+func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, protocol RaftProtocol) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		t.logger.Printf("could not read body: %s", err.Error())
@@ -54,9 +59,7 @@ func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(400)
 		return
 	}
-	responseCh := make(chan RequestVoteResult)
-	node.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}
-	response := <-responseCh
+	response := protocol.RequestVote(requestVote)
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		t.logger.Printf("could not serialize response body: %s", err.Error())
@@ -70,7 +73,7 @@ func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Request, node *Node) {
+func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Request, protocol RaftProtocol) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		t.logger.Printf("could not read body: %s", err.Error())
@@ -83,9 +86,7 @@ func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(400)
 		return
 	}
-	responseCh := make(chan AppendEntriesResult)
-	node.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}
-	response := <-responseCh
+	response := protocol.AppendEntries(appendEntries)
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		t.logger.Printf("could not serialize response body: %s", err.Error())
@@ -99,13 +100,13 @@ func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func (t *httpTransport) Serve(node *Node) error {
+func (t *httpTransport) Serve(protocol RaftProtocol) error {
 	handler := http.NewServeMux()
 	handler.HandleFunc("POST /rpc/request-vote", func(w http.ResponseWriter, r *http.Request) {
-		t.handlerRequestVote(w, r, node)
+		t.handlerRequestVote(w, r, protocol)
 	})
 	handler.HandleFunc("POST /rpc/append-entries", func(w http.ResponseWriter, r *http.Request) {
-		t.handlerAppendEntries(w, r, node)
+		t.handlerAppendEntries(w, r, protocol)
 	})
 	host := t.nodeAddrs[t.id]
 	t.logger.Printf("Running HTTP server at %v", host)

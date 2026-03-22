@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,47 @@ func TestRaft(t *testing.T) {
 		ports.ports = append(ports.ports, p)
 	}
 
+	t.Run("Cluster handles leader high latency", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+
+		initialLeader := cluster.leader(t)
+		cluster.command(t, []byte{1}, initialLeader)
+		cluster.wait()
+		cluster.assertHealthy(t)
+
+		t.Logf("Set latency to leader %s", initialLeader.n.Id)
+		latency := time.Second
+		initialLeader.network.latency.Store(int64(latency))
+		initialTerm := initialLeader.n.CurrentTerm()
+		cluster.waitFor(time.Millisecond * 500)
+
+		leaders := cluster.getNodes(raft.Leader)
+		followers := cluster.getNodes(raft.Follower)
+		asserts.Len(t, 2, leaders)
+		asserts.Len(t, 1, followers)
+		var newLeader node
+		if leaders[0].n.Id == initialLeader.n.Id {
+			newLeader = leaders[1]
+		} else {
+			newLeader = leaders[0]
+		}
+		asserts.Gt(t, initialTerm, newLeader.n.CurrentTerm())
+		cluster.waitFor(time.Millisecond * 500)
+		cluster.assertFollower(t, followers[0], newLeader)
+
+		cluster.command(t, []byte{2}, newLeader)
+		cluster.wait()
+		cluster.assertFollower(t, followers[0], newLeader)
+
+		t.Logf("Remove latency")
+		initialLeader.network.latency.Store(0)
+		cluster.waitFor(latency)
+		cluster.assertFollower(t, initialLeader, newLeader)
+		cluster.assertHealthy(t)
+	})
 	t.Run("Cluster gives no shit when follower fails", func(t *testing.T) {
 		t.Parallel()
 		cluster := newCluster(ports.popPorts())
@@ -88,6 +130,49 @@ func TestRaft(t *testing.T) {
 type node struct {
 	n       *raft.Node
 	storage *storage.ListStorage
+	network *networkConditions
+}
+
+type networkConditions struct {
+	latency atomic.Int64
+}
+
+type wrapProtocol struct {
+	actual raft.RaftProtocol
+	cond   *networkConditions
+}
+
+func (p wrapProtocol) RequestVote(arg raft.RequestVote) raft.RequestVoteResult {
+	time.Sleep(time.Duration(p.cond.latency.Load()))
+	return p.actual.RequestVote(arg)
+}
+
+func (p wrapProtocol) AppendEntries(arg raft.AppendEntries) raft.AppendEntriesResult {
+	time.Sleep(time.Duration(p.cond.latency.Load()))
+	return p.actual.AppendEntries(arg)
+}
+
+type transport struct {
+	actual raft.Transport
+	cond   networkConditions
+}
+
+func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote, node raft.NodeId) (raft.RequestVoteResult, error) {
+	time.Sleep(time.Duration(t.cond.latency.Load()))
+	return t.actual.IssueRequestVote(ctx, data, node)
+}
+
+func (t *transport) IssueAppendEntries(ctx context.Context, data raft.AppendEntries, node raft.NodeId) (raft.AppendEntriesResult, error) {
+	time.Sleep(time.Duration(t.cond.latency.Load()))
+	return t.actual.IssueAppendEntries(ctx, data, node)
+}
+
+func (t *transport) Serve(protocol raft.RaftProtocol) error {
+	return t.actual.Serve(wrapProtocol{actual: protocol, cond: &t.cond})
+}
+
+func (t *transport) Shutdown(ctx context.Context) error {
+	return t.actual.Shutdown(ctx)
 }
 
 type cluster struct {
@@ -104,8 +189,9 @@ func newCluster(ports []int) *cluster {
 	for i := range ports {
 		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
-		n := raft.NewNode(id, peers, raft.HTTPTransport(id, peers), storage).LogPrefixId()
-		cluster.nodes[id] = node{n, storage}
+		transport := &transport{actual: raft.HTTPTransport(id, peers)}
+		n := raft.NewNode(id, peers, transport, storage).LogPrefixId()
+		cluster.nodes[id] = node{n, storage, &transport.cond}
 	}
 	return cluster
 }
@@ -157,6 +243,7 @@ func (c *cluster) command(t *testing.T, cmd []byte, node node) {
 }
 
 func (c *cluster) leader(t *testing.T) node {
+	t.Helper()
 	leaders := c.getNodes(raft.Leader)
 	asserts.Len(t, 1, leaders)
 	return leaders[0]
@@ -180,8 +267,12 @@ func (c *cluster) stop(ctx context.Context) {
 	}
 }
 
+func (s *cluster) waitFor(d time.Duration) {
+	time.Sleep(d)
+}
+
 func (s *cluster) wait() {
-	time.Sleep(time.Millisecond * 500)
+	s.waitFor(time.Millisecond * 500)
 }
 
 type portsStack struct {

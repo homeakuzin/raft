@@ -175,11 +175,24 @@ func (n *Node) ClientCommand(ctx context.Context, command []byte) {
 	}
 }
 
+func (n *Node) RequestVote(requestVote RequestVote) RequestVoteResult {
+	responseCh := make(chan RequestVoteResult)
+	n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}
+	return <-responseCh
+}
+
+func (n *Node) AppendEntries(appendEntries AppendEntries) AppendEntriesResult {
+	responseCh := make(chan AppendEntriesResult)
+	n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}
+	return <-responseCh
+}
+
 func (n *Node) Run() error {
 	if n.State() != Dead {
 		n.logger.Print("already running")
 		return nil
 	}
+
 	if err := n.transport.Serve(n); err != nil {
 		n.logger.Printf("could not run node server: %s", err.Error())
 		return err
@@ -216,6 +229,7 @@ func (n *Node) eventLoop() {
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
 	defer close(appendEntriesResponse)
 
+	ctx, cancel := context.WithCancel(context.Background())
 eventLoop:
 	for {
 		select {
@@ -228,16 +242,16 @@ eventLoop:
 		case requestVote := <-n.requestVoteRpc:
 			requestVote.result <- n.requestVoteRPC(requestVote.data)
 		case <-n.electionTimer.C:
-			n.startElection(requestVoteResponse)
+			n.startElection(ctx, requestVoteResponse)
 		case response := <-requestVoteResponse:
 			n.onRequestVoteResponse(response)
 
 		case <-n.heartbeatTimer.C:
-			n.sendHeartbeats(appendEntriesResponse)
+			n.sendHeartbeats(ctx, appendEntriesResponse)
 		case appendEntriesResult := <-appendEntriesResponse:
-			n.onAppendEntriesResponse(appendEntriesResult, appendEntriesResponse)
+			n.onAppendEntriesResponse(ctx, appendEntriesResult, appendEntriesResponse)
 		case req := <-n.clientRequestCh:
-			n.onClientCommand(req, appendEntriesResponse)
+			n.onClientCommand(ctx, req, appendEntriesResponse)
 		}
 
 		switch n.State() {
@@ -249,9 +263,10 @@ eventLoop:
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
+	cancel()
 }
 
-func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+func (n *Node) onClientCommand(ctx context.Context, req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
 		n.logger.Printf("Warning: got client request in state %s", state)
 		req.client <- 1
@@ -261,7 +276,7 @@ func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- a
 	for _, id := range n.otherNodeIds {
 		go func() {
 			appendEntries := n.makeAppendEntries(id)
-			result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, id)
+			result, err := n.transport.IssueAppendEntries(ctx, appendEntries, id)
 			if err != nil {
 				n.logger.Printf("could not issue AppendEntries to %s: %s", id, err.Error())
 			} else {
@@ -271,7 +286,7 @@ func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- a
 	}
 }
 
-func (n *Node) onAppendEntriesResponse(appendEntriesResult appendEntriesFollowerResult, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult appendEntriesFollowerResult, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
 		n.logger.Printf("Warning: got AppendEntriesRPCResult in state %s", state)
 		return
@@ -311,7 +326,7 @@ func (n *Node) onAppendEntriesResponse(appendEntriesResult appendEntriesFollower
 		n.mu.Unlock()
 		go func() {
 			appendEntries := n.makeAppendEntries(appendEntriesResult.id)
-			result, err := n.transport.IssueAppendEntries(context.Background(), appendEntries, appendEntriesResult.id)
+			result, err := n.transport.IssueAppendEntries(ctx, appendEntries, appendEntriesResult.id)
 			if err != nil {
 				n.logger.Printf("could not reissue AppendEntries to %s: %s", appendEntriesResult.id, err.Error())
 			} else {
@@ -321,16 +336,15 @@ func (n *Node) onAppendEntriesResponse(appendEntriesResult appendEntriesFollower
 	}
 }
 
-func (n *Node) sendHeartbeats(appendEntriesResponse chan<- appendEntriesFollowerResult) {
+func (n *Node) sendHeartbeats(ctx context.Context, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
 		n.logger.Printf("Warning: got heartbeatTimer tick in state %s", state)
 		return
 	}
-	appendEntriesCtx := context.Background()
 	for _, id := range n.otherNodeIds {
 		go func() {
 			appendEntries := n.makeAppendEntries(id)
-			result, err := n.transport.IssueAppendEntries(appendEntriesCtx, n.makeAppendEntries(id), id)
+			result, err := n.transport.IssueAppendEntries(ctx, n.makeAppendEntries(id), id)
 			if err != nil {
 				n.dlog("could not issue heartbeat to %s: %s", id, err.Error())
 			} else {
@@ -359,12 +373,12 @@ func (n *Node) onRequestVoteResponse(response RequestVoteResult) {
 	}
 }
 
-func (n *Node) startElection(requestVoteResponse chan<- RequestVoteResult) {
+func (n *Node) startElection(ctx context.Context, requestVoteResponse chan<- RequestVoteResult) {
 	n.becomeCandidate()
 	for _, id := range n.otherNodeIds {
 		go func() {
 			n.dlog("issuing RequestVote to %s", id)
-			result, err := n.transport.IssueRequestVote(context.Background(), RequestVote{
+			result, err := n.transport.IssueRequestVote(ctx, RequestVote{
 				Term:        n.CurrentTerm(),
 				CandidateId: n.Id,
 			}, id)
