@@ -56,6 +56,7 @@ type Node struct {
 	commitCh         chan int
 	clientRequestCh  chan clientRequest
 	logger           *log.Logger
+	debug            bool
 }
 
 func (n *Node) Verbose() *Node {
@@ -154,11 +155,11 @@ func (n *Node) Shutdown(ctx context.Context) {
 		return
 	}
 	n.logger.Print("shutting down")
+	n.shutdown <- struct{}{}
+	close(n.shutdown)
 	if err := n.transport.Shutdown(ctx); err != nil {
 		n.logger.Printf("could not shutdown HTTP server: %s", err.Error())
 	}
-	n.shutdown <- struct{}{}
-	close(n.shutdown)
 }
 
 // Blocks until majority of the cluster agrees on a command
@@ -203,10 +204,10 @@ func (n *Node) Run() error {
 	n.votedFor = EmptyId
 
 	n.electionTimer = time.NewTimer(generateElectionTimeout())
-	defer n.electionTimer.Stop()
 	n.heartbeatTimer = time.NewTimer(heartbeatPeriod)
-	defer n.heartbeatTimer.Stop()
 	n.heartbeatTimer.Stop()
+	defer n.electionTimer.Stop()
+	defer n.heartbeatTimer.Stop()
 
 	n.mu.Unlock()
 	n.logger.Print("starting event loop")
@@ -229,12 +230,17 @@ func (n *Node) eventLoop() {
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
 	defer close(appendEntriesResponse)
 
+	// defer n.electionTimer.Stop()
+	// defer n.heartbeatTimer.Stop()
+
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 eventLoop:
 	for {
 		select {
 		case <-n.shutdown:
 			n.logger.Print("shut down event loop")
+			// cancel()
 			break eventLoop
 
 		case appendEntries := <-n.appendEntriesRpc:
@@ -263,9 +269,9 @@ eventLoop:
 			n.heartbeatTimer.Reset(heartbeatPeriod)
 		}
 	}
-	cancel()
 }
 
+// maybe return error to a client?
 func (n *Node) onClientCommand(ctx context.Context, req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
 		n.logger.Printf("Warning: got client request in state %s", state)
@@ -409,6 +415,10 @@ func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
 	return response
 }
 
+func (n *Node) Debug() {
+	n.debug = true
+}
+
 // Receiver implementation:
 // 1. Reply false if term < currentTerm (§5.1)
 // 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -416,38 +426,39 @@ func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
 // 4. Append any new entries not already in the log
 // 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult {
-	response := AppendEntriesResult{}
-	if appendEntries.Term >= n.CurrentTerm() {
-		n.setCurrentTerm(appendEntries.Term)
-		n.becomeFollower()
-		response.Success = true
-		if len(appendEntries.Entries) > 0 {
-			if appendEntries.PrevLogIndex > 0 {
-				lastEntry, ok := n.StateMachine.At(appendEntries.PrevLogIndex)
-				if ok {
-					if lastEntry.Term == appendEntries.PrevLogTerm {
-						response.Success = true
-						logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
-						n.logger.Printf("Replicated %d Leader entries: %d logs now", len(appendEntries.Entries), logs)
-					} else {
-						response.Success = false
-						n.StateMachine.DeleteFrom(appendEntries.PrevLogIndex)
-					}
-				}
-			} else {
-				response.Success = true
-				logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
-				n.logger.Printf("Replicated first %d Leader entries: %d logs now", len(appendEntries.Entries), logs)
-			}
-		}
-		if appendEntries.LeaderCommit > n.StateMachine.CommitIndex() {
-			actualCommit := appendEntries.LeaderCommit
-			n.StateMachine.Apply(actualCommit)
-			n.StateMachine.SetCommitIndex(actualCommit)
-			n.logger.Printf("Applied commit index %d", actualCommit)
-		}
+	response := AppendEntriesResult{Term: n.CurrentTerm()}
+	if appendEntries.Term < n.CurrentTerm() {
+		return response
 	}
-	response.Term = n.CurrentTerm()
+	if len(appendEntries.Entries) > 0 {
+		n.logger.Printf("%v", appendEntries)
+		if appendEntries.PrevLogIndex > -1 {
+			lastEntry, ok := n.StateMachine.At(appendEntries.PrevLogIndex)
+			if !ok {
+				return response
+			}
+			if lastEntry.Term != appendEntries.PrevLogTerm {
+				n.StateMachine.DeleteFrom(appendEntries.PrevLogIndex)
+				return response
+			}
+		} else if nlogs := n.StateMachine.Len(); nlogs > 0 {
+			n.StateMachine.DeleteFrom(0)
+			n.logger.Printf("leader thought we had no logs. huh. we have %d of them", nlogs)
+			return response
+		}
+		logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
+		n.logger.Printf("replicated %d leader logs: %d logs now", len(appendEntries.Entries), logs)
+	}
+	n.setCurrentTerm(appendEntries.Term)
+	n.becomeFollower()
+	if appendEntries.LeaderCommit > n.StateMachine.CommitIndex() {
+		actualCommit := appendEntries.LeaderCommit
+		n.StateMachine.Apply(actualCommit)
+		n.StateMachine.SetCommitIndex(actualCommit)
+		n.logger.Printf("Applied commit index %d", actualCommit)
+	}
+	response.Success = true
+	n.logger.Printf("respond to %v", appendEntries)
 	return response
 }
 
@@ -497,10 +508,12 @@ func (n *Node) becomeLeader() {
 	if n.setState(Leader) != Leader {
 		n.logger.Printf("Turning to a Leader")
 	}
+	n.mu.Lock()
 	for _, id := range n.otherNodeIds {
 		n.nextIndex[id] = n.StateMachine.LastApplied() + 1
 		n.matchIndex[id] = 0
 	}
+	n.mu.Unlock()
 	n.electionTimer.Stop()
 	n.heartbeatTimer.Reset(heartbeatPeriod)
 }

@@ -76,7 +76,7 @@ func (m *StateMachine) MustAt(index int) Entry {
 func (m *StateMachine) DeleteFrom(from int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.logs = m.logs[from:]
+	m.logs = m.logs[:from]
 }
 
 func (m *StateMachine) NextEntriesForFollower(from int) []Entry {

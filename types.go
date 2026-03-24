@@ -17,6 +17,25 @@ type RequestVoteResult struct {
 	VoteGranted bool
 }
 
+// type Entry struct {
+// ..Command []byte
+// ..Term    int
+// }
+// Term: 1
+// Leader: node-0
+// PrevLogIndex -1
+// PrevLogTerm 0
+// Entries [{[1] 1}]
+// LeaderCommit -1
+// LogIndex 0
+//
+// Term: 1
+// Leader: node-0
+// PrevLogIndex -1
+// PrevLogTerm 0
+// Entries [{[1] 1} {[2] 1}]
+// LeaderCommit 0
+// LogIndex 1
 type AppendEntries struct {
 	Term         int
 	LeaderId     NodeId

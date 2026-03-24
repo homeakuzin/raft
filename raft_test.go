@@ -2,6 +2,7 @@ package raft_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,68 @@ func TestRaft(t *testing.T) {
 		ports.ports = append(ports.ports, p)
 	}
 
+	t.Run("Replication works", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+		initialLeader := cluster.leader(t)
+		cluster.command(t, []byte{1}, initialLeader)
+		cluster.command(t, []byte{2}, initialLeader)
+		cluster.wait()
+		cluster.assertHealthy(t)
+		cluster.command(t, []byte{3}, initialLeader)
+		cluster.wait()
+		cluster.assertHealthy(t)
+	})
+	t.Run("Cluster handles leader network partition", func(t *testing.T) {
+		t.Parallel()
+		cluster := newCluster(ports.popPorts())
+		defer cluster.stop(t.Context())
+		cluster.setup(t)
+
+		initialLeader := cluster.leader(t)
+		initialTerm := initialLeader.n.CurrentTerm()
+		cluster.command(t, []byte{1}, initialLeader)
+		cluster.wait()
+		cluster.assertHealthy(t)
+
+		t.Logf("Partition leader %s", initialLeader.n.Id)
+		for _, node := range cluster.nodes {
+			node.network.unavailableNode.Store(int32(initialLeader.n.Id))
+		}
+		cluster.wait()
+		leaders := cluster.getNodes(raft.Leader)
+		followers := cluster.getNodes(raft.Follower)
+		asserts.Len(t, 2, leaders)
+		asserts.Len(t, 1, followers)
+		var newLeader node
+		if leaders[0].n.Id == initialLeader.n.Id {
+			newLeader = leaders[1]
+		} else {
+			newLeader = leaders[0]
+		}
+		asserts.Gt(t, initialTerm, newLeader.n.CurrentTerm())
+		cluster.assertFollower(t, followers[0], newLeader)
+
+		cluster.command(t, []byte{2}, newLeader)
+		initialLeader.n.StateMachine.AppendLogs(raft.Entry{[]byte{3}, initialTerm})
+		initialLeader.n.StateMachine.Apply(1)
+		cluster.wait()
+		cluster.assertFollower(t, followers[0], newLeader)
+		asserts.Len(t, 2, newLeader.storage.Commands())
+		asserts.Slice(t, []byte{2}, newLeader.storage.Commands()[1])
+		asserts.Len(t, 2, initialLeader.storage.Commands())
+		asserts.Slice(t, []byte{3}, initialLeader.storage.Commands()[1])
+
+		t.Logf("Restore %s availability", initialLeader.n.Id)
+		for _, node := range cluster.nodes {
+			node.network.unavailableNode.Store(-1)
+		}
+		initialLeader.n.Debug()
+		cluster.wait()
+		cluster.assertHealthy(t)
+	})
 	t.Run("Cluster handles leader high latency", func(t *testing.T) {
 		t.Parallel()
 		cluster := newCluster(ports.popPorts())
@@ -134,10 +197,12 @@ type node struct {
 }
 
 type networkConditions struct {
-	latency atomic.Int64
+	unavailableNode atomic.Int32
+	latency         atomic.Int64
 }
 
 type wrapProtocol struct {
+	node   node
 	actual raft.RaftProtocol
 	cond   *networkConditions
 }
@@ -153,16 +218,25 @@ func (p wrapProtocol) AppendEntries(arg raft.AppendEntries) raft.AppendEntriesRe
 }
 
 type transport struct {
+	node   node
 	actual raft.Transport
 	cond   networkConditions
 }
 
 func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote, node raft.NodeId) (raft.RequestVoteResult, error) {
+	unavailableNodeId := raft.NodeId(t.cond.unavailableNode.Load())
+	if unavailableNodeId == node || t.node.n.Id == unavailableNodeId {
+		return raft.RequestVoteResult{}, errors.New("node is unavailable")
+	}
 	time.Sleep(time.Duration(t.cond.latency.Load()))
 	return t.actual.IssueRequestVote(ctx, data, node)
 }
 
 func (t *transport) IssueAppendEntries(ctx context.Context, data raft.AppendEntries, node raft.NodeId) (raft.AppendEntriesResult, error) {
+	unavailableNodeId := raft.NodeId(t.cond.unavailableNode.Load())
+	if unavailableNodeId == node || t.node.n.Id == unavailableNodeId {
+		return raft.AppendEntriesResult{}, errors.New("node is unavailable")
+	}
 	time.Sleep(time.Duration(t.cond.latency.Load()))
 	return t.actual.IssueAppendEntries(ctx, data, node)
 }
@@ -189,9 +263,12 @@ func newCluster(ports []int) *cluster {
 	for i := range ports {
 		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
-		transport := &transport{actual: raft.HTTPTransport(id, peers)}
+		transport := &transport{actual: raft.HTTPTransport(id, peers), cond: networkConditions{}}
+		transport.cond.unavailableNode.Store(-1)
 		n := raft.NewNode(id, peers, transport, storage).LogPrefixId()
-		cluster.nodes[id] = node{n, storage, &transport.cond}
+		node := node{n, storage, &transport.cond}
+		transport.node = node
+		cluster.nodes[id] = node
 	}
 	return cluster
 }
@@ -228,9 +305,9 @@ func (c *cluster) assertFollower(t *testing.T, node, leader node) {
 
 	logs := node.storage.Commands()
 	leaderLogs := leader.storage.Commands()
-	asserts.Len(t, leaderCommit+1, logs)
+	asserts.EqualEx(t, leaderCommit+1, len(logs), fmt.Sprintf("leader %s commit is %d, but %s has %d logs", leader.n.Id, leaderCommit+1, node.n.Id, len(logs)))
 	for i := range logs {
-		asserts.Slice(t, leaderLogs[i], logs[i])
+		asserts.SliceEx(t, leaderLogs[i], logs[i], fmt.Sprintf("folower %s logs (%v) differ from leader %s (%v)", node.n.Id, logs, leader.n.Id, leaderLogs))
 	}
 }
 
