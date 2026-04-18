@@ -307,6 +307,7 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 		n.matchIndex[appendEntriesResult.id] = appendEntriesResult.request.LogIndex
 		if len(appendEntriesResult.request.Entries) > 0 {
 			savedCommitIndex := n.StateMachine.CommitIndex()
+			newCommitIndex := savedCommitIndex
 			for i := n.StateMachine.CommitIndex() + 1; i < n.StateMachine.Len(); i++ {
 				if n.StateMachine.MustAt(i).Term == n.CurrentTerm() {
 					matchCount := 1
@@ -316,12 +317,13 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 						}
 					}
 					if matchCount*2 > len(n.otherNodeIds)+1 {
-						n.StateMachine.SetCommitIndex(i)
+						newCommitIndex = i
 					}
 				}
 			}
-			if n.StateMachine.CommitIndex() > savedCommitIndex {
+			if newCommitIndex > savedCommitIndex {
 				n.logger.Printf("set CommitIndex = %d", n.StateMachine.CommitIndex())
+				n.StateMachine.SetCommitIndex(newCommitIndex)
 				n.StateMachine.Apply(n.StateMachine.CommitIndex())
 				appendEntriesResult.client <- n.StateMachine.CommitIndex()
 			}
