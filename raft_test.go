@@ -38,7 +38,6 @@ func TestRaft(t *testing.T) {
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster handles leader network partition", func(t *testing.T) {
-		return //TODO
 		t.Parallel()
 		cluster := newCluster(ports.popPorts())
 		defer cluster.stop(t.Context())
@@ -73,10 +72,10 @@ func TestRaft(t *testing.T) {
 		initialLeader.n.StateMachine.Apply(1)
 		cluster.wait()
 		cluster.assertFollower(t, followers[0], newLeader)
-		asserts.Len(t, 2, newLeader.storage.Commands())
-		asserts.Slice(t, []byte{2}, newLeader.storage.Commands()[1])
-		asserts.Len(t, 2, initialLeader.storage.Commands())
-		asserts.Slice(t, []byte{3}, initialLeader.storage.Commands()[1])
+		asserts.Len(t, 2, newLeader.n.StateMachine.Logs())
+		asserts.Slice(t, []byte{2}, newLeader.n.StateMachine.Logs()[1].Command)
+		asserts.Len(t, 2, initialLeader.n.StateMachine.Logs())
+		asserts.Slice(t, []byte{3}, initialLeader.n.StateMachine.Logs()[1].Command)
 
 		t.Logf("Restore %s availability", initialLeader.n.Id)
 		for _, node := range cluster.nodes {
@@ -287,7 +286,7 @@ func (c *cluster) getNodes(state raft.State) []node {
 func (c *cluster) assertHealthy(t *testing.T) {
 	leader := c.leader(t)
 	leaderCommit := leader.n.StateMachine.CommitIndex()
-	leaderLogs := leader.storage.Commands()
+	leaderLogs := leader.n.StateMachine.Logs()
 	asserts.Len(t, leaderCommit+1, leaderLogs)
 
 	followers := c.getNodes(raft.Follower)
@@ -304,20 +303,20 @@ func (c *cluster) assertFollower(t *testing.T, node, leader node) {
 	leaderCommit := leader.n.StateMachine.CommitIndex()
 	asserts.Equal(t, leaderCommit, node.n.StateMachine.CommitIndex())
 
-	logs := node.storage.Commands()
-	leaderLogs := leader.storage.Commands()
+	logs := node.n.StateMachine.Logs()
+	leaderLogs := leader.n.StateMachine.Logs()
 	asserts.EqualEx(t, leaderCommit+1, len(logs), fmt.Sprintf("leader %s commit is %d, but %s has %d logs", leader.n.Id, leaderCommit+1, node.n.Id, len(logs)))
 	for i := range logs {
-		asserts.SliceEx(t, leaderLogs[i], logs[i], fmt.Sprintf("folower %s logs (%v) differ from leader %s (%v)", node.n.Id, logs, leader.n.Id, leaderLogs))
+		asserts.SliceEx(t, leaderLogs[i].Command, logs[i].Command, fmt.Sprintf("folower %s logs (%v) differ from leader %s (%v)", node.n.Id, logs, leader.n.Id, leaderLogs))
 	}
 }
 
 func (c *cluster) command(t *testing.T, cmd []byte, node node) {
-	logsBefore := node.storage.Commands()
+	logsBefore := node.n.StateMachine.Logs()
 	node.n.ClientCommand(t.Context(), cmd)
-	logs := node.storage.Commands()
+	logs := node.n.StateMachine.Logs()
 	asserts.Equal(t, len(logsBefore)+1, len(logs))
-	asserts.Slice(t, cmd, logs[len(logs)-1])
+	asserts.Slice(t, cmd, logs[len(logs)-1].Command)
 }
 
 func (c *cluster) leader(t *testing.T) node {

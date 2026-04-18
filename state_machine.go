@@ -67,6 +67,14 @@ func (m *StateMachine) At(index int) (Entry, bool) {
 	return m.logs[index], true
 }
 
+func (m *StateMachine) Logs() []Entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	logs := make([]Entry, len(m.logs))
+	copy(logs, m.logs)
+	return logs
+}
+
 func (m *StateMachine) MustAt(index int) Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
