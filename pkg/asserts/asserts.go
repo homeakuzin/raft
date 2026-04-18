@@ -61,7 +61,7 @@ func ErrNil(t testing.TB, err error) {
 func SliceEx[E comparable](t testing.TB, expected, actual []E, message string) {
 	t.Helper()
 	if !slices.Equal(expected, actual) {
-		t.Fatal(message)
+		t.Fatalf("assertion failed: %s", message)
 	}
 }
 
@@ -89,7 +89,7 @@ func NotEqual[T comparable](t testing.TB, expected, actual T) {
 func EqualEx[T comparable](t testing.TB, expected, actual T, message string) {
 	t.Helper()
 	if expected != actual {
-		t.Fatal(message)
+		t.Fatalf("assertion failed: %s", message)
 	}
 }
 

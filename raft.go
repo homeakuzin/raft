@@ -439,6 +439,7 @@ func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult
 			}
 			if lastEntry.Term != appendEntries.PrevLogTerm {
 				n.StateMachine.DeleteFrom(appendEntries.PrevLogIndex)
+				n.logger.Printf("delete from %d. now %+v", appendEntries.PrevLogIndex, n.StateMachine.logs)
 				return response
 			}
 		} else if nlogs := n.StateMachine.Len(); nlogs > 0 {
@@ -458,7 +459,6 @@ func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult
 		n.logger.Printf("Applied commit index %d", actualCommit)
 	}
 	response.Success = true
-	n.logger.Printf("respond to %v", appendEntries)
 	return response
 }
 
