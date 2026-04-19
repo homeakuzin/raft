@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -263,9 +265,10 @@ func newCluster(ports []int) *cluster {
 	for i := range ports {
 		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
-		transport := &transport{actual: raft.HTTPTransport(id, peers), cond: networkConditions{}}
+		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+		transport := &transport{actual: raft.HTTPTransport(id, peers, logger), cond: networkConditions{}}
 		transport.cond.unavailableNode.Store(-1)
-		n := raft.NewNode(id, peers, transport, storage).LogPrefixId()
+		n := raft.NewNode(id, peers, transport, storage, logger)
 		node := node{n, storage, &transport.cond}
 		transport.node = node
 		cluster.nodes[id] = node

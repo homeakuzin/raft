@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 )
@@ -35,11 +35,11 @@ type httpTransport struct {
 	id        NodeId
 	nodeAddrs map[NodeId]string
 	server    *http.Server
-	logger    *log.Logger
+	logger    *slog.Logger
 }
 
-func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string) Transport {
-	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: log.New(log.Writer(), fmt.Sprintf("[%s] ", id), log.Flags())}
+func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string, logger *slog.Logger) Transport {
+	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
 }
 
 func (t *httpTransport) Shutdown(ctx context.Context) error {
@@ -49,25 +49,25 @@ func (t *httpTransport) Shutdown(ctx context.Context) error {
 func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, protocol RaftProtocol) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		t.logger.Printf("could not read body: %s", err.Error())
+		t.logger.Error("could not read body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	var requestVote RequestVote
 	if err := json.Unmarshal(body, &requestVote); err != nil {
-		t.logger.Printf("invalid body: %s", err.Error())
+		t.logger.Info("invalid body", "error", err.Error())
 		w.WriteHeader(400)
 		return
 	}
 	response := protocol.RequestVote(requestVote)
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
-		t.logger.Printf("could not serialize response body: %s", err.Error())
+		t.logger.Info("could not serialize response body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	if _, err := w.Write(responseBody); err != nil {
-		t.logger.Printf("could not write response body: %s", err.Error())
+		t.logger.Error("could not write response body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
@@ -76,25 +76,25 @@ func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Reques
 func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Request, protocol RaftProtocol) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		t.logger.Printf("could not read body: %s", err.Error())
+		t.logger.Error("could not read body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	var appendEntries AppendEntries
 	if err := json.Unmarshal(body, &appendEntries); err != nil {
-		t.logger.Printf("invalid body: %s", err.Error())
+		t.logger.Info("invalid body", "error", err.Error())
 		w.WriteHeader(400)
 		return
 	}
 	response := protocol.AppendEntries(appendEntries)
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
-		t.logger.Printf("could not serialize response body: %s", err.Error())
+		t.logger.Info("could not serialize response body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
 	if _, err := w.Write(responseBody); err != nil {
-		t.logger.Printf("could not write response body: %s", err.Error())
+		t.logger.Error("could not write response body", "error", err.Error())
 		w.WriteHeader(500)
 		return
 	}
@@ -109,7 +109,7 @@ func (t *httpTransport) Serve(protocol RaftProtocol) error {
 		t.handlerAppendEntries(w, r, protocol)
 	})
 	host := t.nodeAddrs[t.id]
-	t.logger.Printf("Running HTTP server at %v", host)
+	t.logger.Info("Running HTTP server", "host", host)
 	t.server = &http.Server{Addr: host, Handler: handler}
 
 	addr := host
