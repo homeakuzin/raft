@@ -55,6 +55,7 @@ type Node struct {
 	commitCh         chan int
 	clientRequestCh  chan clientRequest
 	logger           *slog.Logger
+	eventHandlers    []*EventHandler
 	debug            bool
 }
 
@@ -84,6 +85,14 @@ func NewNode(id NodeId, nodes map[NodeId]string, transport Transport, storage St
 		matchIndex:       make(map[NodeId]int),
 		logger:           logger.With("node", id.String()),
 	}
+}
+
+func (n *Node) RegisterEventHandler(handler func(h *EventHandler, event any)) *EventHandler {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	h := &EventHandler{handler, true}
+	n.eventHandlers = append(n.eventHandlers, h)
+	return h
 }
 
 func (n *Node) CurrentTerm() int {
@@ -238,7 +247,7 @@ eventLoop:
 			break eventLoop
 
 		case appendEntries := <-n.appendEntriesRpc:
-			appendEntries.result <- n.appendEntriecRPC(appendEntries.data)
+			appendEntries.result <- n.appendEntriesRPC(appendEntries.data)
 		case requestVote := <-n.requestVoteRpc:
 			requestVote.result <- n.requestVoteRPC(requestVote.data)
 		case <-n.electionTimer.C:
@@ -350,7 +359,10 @@ func (n *Node) sendHeartbeats(ctx context.Context, appendEntriesResponse chan<- 
 			if err != nil {
 				n.logger.Debug("could not issue heartbeat", "dest", id, "error", err.Error())
 			} else {
-				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, nil, id}
+				select {
+				case <-ctx.Done():
+				case appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, nil, id}:
+				}
 			}
 		}()
 	}
@@ -387,7 +399,10 @@ func (n *Node) startElection(ctx context.Context, requestVoteResponse chan<- Req
 			if err != nil {
 				n.logger.Debug("could not issue RequestVote", "dest", id, "error", err.Error())
 			} else {
-				requestVoteResponse <- result
+				select {
+				case <-ctx.Done():
+				case requestVoteResponse <- result:
+				}
 			}
 		}()
 	}
@@ -421,7 +436,7 @@ func (n *Node) Debug() {
 // 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 // 4. Append any new entries not already in the log
 // 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult {
+func (n *Node) appendEntriesRPC(appendEntries AppendEntries) AppendEntriesResult {
 	response := AppendEntriesResult{Term: n.CurrentTerm()}
 	if appendEntries.Term < n.CurrentTerm() {
 		return response
@@ -452,6 +467,7 @@ func (n *Node) appendEntriecRPC(appendEntries AppendEntries) AppendEntriesResult
 		n.StateMachine.Apply(actualCommit)
 		n.StateMachine.SetCommitIndex(actualCommit)
 		n.logger.Info("Applied new commit index", "value", actualCommit)
+		n.dispatchEvent(EventFollowerCommit{actualCommit})
 	}
 	response.Success = true
 	return response
@@ -489,6 +505,7 @@ func (n *Node) becomeCandidate() {
 	n.setVotedFor(n.Id)
 	n.setVotesHave(1)
 	n.logger.Info("election", "term", term)
+	n.dispatchEvent(EventBecomeCandidate{})
 }
 
 func (n *Node) becomeFollower() {
@@ -497,6 +514,7 @@ func (n *Node) becomeFollower() {
 	}
 	n.electionTimer.Reset(generateElectionTimeout())
 	n.heartbeatTimer.Stop()
+	n.dispatchEvent(EventBecomeFollower{})
 }
 
 func (n *Node) becomeLeader() {
@@ -511,4 +529,17 @@ func (n *Node) becomeLeader() {
 	n.mu.Unlock()
 	n.electionTimer.Stop()
 	n.heartbeatTimer.Reset(heartbeatPeriod)
+	n.dispatchEvent(EventBecomeLeader{})
+}
+
+func (n *Node) dispatchEvent(event any) {
+	n.mu.Lock()
+	handlers := make([]*EventHandler, len(n.eventHandlers))
+	copy(handlers, n.eventHandlers)
+	n.mu.Unlock()
+	for i := range handlers {
+		if handlers[i].active {
+			handlers[i].f(handlers[i], event)
+		}
+	}
 }

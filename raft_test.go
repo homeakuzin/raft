@@ -29,14 +29,33 @@ func TestRaft(t *testing.T) {
 		t.Parallel()
 		cluster := newCluster(ports.popPorts())
 		defer cluster.stop(t.Context())
+
+		commit1 := make(chan any, 1)
+		commit2 := make(chan any, 1)
+		commit1Cnt := atomic.Int32{}
+		commit2Cnt := atomic.Int32{}
+		for _, node := range cluster.nodes {
+			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+				switch data := event.(type) {
+				case raft.EventFollowerCommit:
+					if data.NewCommitIndex == 1 && commit1Cnt.Add(1) == 2 {
+						close(commit1)
+					}
+					if data.NewCommitIndex == 2 && commit2Cnt.Add(1) == 2 {
+						commit2 <- data
+					}
+				}
+			})
+		}
+
 		cluster.setup(t)
 		initialLeader := cluster.leader(t)
 		cluster.command(t, []byte{1}, initialLeader)
 		cluster.command(t, []byte{2}, initialLeader)
-		cluster.wait()
+		cluster.wait1(commit1)
 		cluster.assertHealthy(t)
 		cluster.command(t, []byte{3}, initialLeader)
-		cluster.wait()
+		cluster.wait1(commit2)
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster handles leader network partition", func(t *testing.T) {
@@ -331,8 +350,32 @@ func (c *cluster) leader(t *testing.T) node {
 
 func (c *cluster) setup(t *testing.T) {
 	c.run()
-	c.wait()
+	t.Log("cluster is running")
+	followers := atomic.Int32{}
+	followersCh := make(chan any)
+	leaderCh := make(chan any, 5)
+	for _, node := range c.nodes {
+		node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch event.(type) {
+			case raft.EventBecomeFollower:
+				h.Stop()
+				if followers.Add(1) == 2 {
+					close(followersCh)
+				}
+			}
+		})
+		node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch event.(type) {
+			case raft.EventBecomeLeader:
+				h.Stop()
+				close(leaderCh)
+			}
+		})
+	}
+	c.wait1(leaderCh)
+	c.wait1(followersCh)
 	c.assertHealthy(t)
+	t.Log("cluster is healthy")
 }
 
 func (c *cluster) run() {
@@ -349,6 +392,25 @@ func (c *cluster) stop(ctx context.Context) {
 
 func (s *cluster) waitFor(d time.Duration) {
 	time.Sleep(d)
+}
+
+func (s *cluster) wait1(ch1 <-chan any) {
+	timer := time.NewTimer(time.Millisecond * 500)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ch1:
+	}
+}
+
+func (s *cluster) wait2(ch1, ch2 <-chan any) {
+	timer := time.NewTimer(time.Millisecond * 500)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ch1:
+	case <-ch2:
+	}
 }
 
 func (s *cluster) wait() {
