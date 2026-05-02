@@ -57,7 +57,6 @@ type Node struct {
 	clientRequestCh  chan clientRequest
 	logger           *slog.Logger
 	eventHandlers    []*EventHandler
-	debug            bool
 }
 
 func (n *Node) Verbose() *Node {
@@ -350,11 +349,11 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 				}
 			}
 			if newCommitIndex > savedCommitIndex {
-				n.logger.Info("update commit index", "value", n.StateMachine.CommitIndex())
+				n.logger.Info("update commit index", "value", newCommitIndex, "previous", savedCommitIndex)
 				n.StateMachine.SetCommitIndex(newCommitIndex)
-				n.StateMachine.Apply(n.StateMachine.CommitIndex())
-				appendEntriesResult.client <- n.StateMachine.CommitIndex()
+				n.StateMachine.Apply(newCommitIndex)
 				n.dispatchEvent(EventCommit{newCommitIndex})
+				appendEntriesResult.client <- newCommitIndex
 			}
 		}
 	} else {
