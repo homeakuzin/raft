@@ -67,6 +67,7 @@ func TestReplicationWorks(t *testing.T) {
 	cluster.wait1(commit3)
 	cluster.assertHealthy(t)
 }
+
 func TestClusterHandlesLeaderNetworkPartition(t *testing.T) {
 	t.Parallel()
 	cluster := newCluster(t, ports.popPorts())
@@ -167,6 +168,7 @@ func TestClusterHandlesLeaderNetworkPartition(t *testing.T) {
 	cluster.wait1(initialLeaderCommitCh1)
 	cluster.assertHealthy(t)
 }
+
 func TestClusterHandlesLeaderHighLatency(t *testing.T) {
 	t.Parallel()
 	cluster := newCluster(t, ports.popPorts())
@@ -260,6 +262,7 @@ func TestClusterHandlesLeaderHighLatency(t *testing.T) {
 	cluster.assertFollower(t, initialLeader, newLeader)
 	cluster.assertHealthy(t)
 }
+
 func TestClusterGivesNoShitWhenFollowerFails(t *testing.T) {
 	t.Parallel()
 	cluster := newCluster(t, ports.popPorts())
@@ -334,6 +337,7 @@ func TestClusterGivesNoShitWhenFollowerFails(t *testing.T) {
 	cluster.wait1(failedFollowerCommit)
 	cluster.assertHealthy(t)
 }
+
 func TestClusterRecoversAfterLeaderFailure(t *testing.T) {
 	t.Parallel()
 	cluster := newCluster(t, ports.popPorts())
@@ -504,8 +508,8 @@ func (t *transport) Serve(protocol raft.RaftProtocol) error {
 	return t.actual.Serve(wrapProtocol{actual: protocol, cond: &t.cond})
 }
 
-func (t *transport) Shutdown(ctx context.Context) error {
-	return t.actual.Shutdown(ctx)
+func (t *transport) ShutdownServer(ctx context.Context) error {
+	return t.actual.ShutdownServer(ctx)
 }
 
 type cluster struct {

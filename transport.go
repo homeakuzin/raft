@@ -23,7 +23,7 @@ type RaftProtocol interface {
 
 type RPCServer interface {
 	Serve(protocol RaftProtocol) error
-	Shutdown(ctx context.Context) error
+	ShutdownServer(ctx context.Context) error
 }
 
 type Transport interface {
@@ -42,8 +42,9 @@ func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string, logger *slog.Logger) 
 	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
 }
 
-func (t *httpTransport) Shutdown(ctx context.Context) error {
-	return t.server.Shutdown(ctx)
+func (t *httpTransport) ShutdownServer(ctx context.Context) error {
+	return t.server.Close()
+	// return t.server.Shutdown(ctx)
 }
 
 func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Request, protocol RaftProtocol) {

@@ -164,7 +164,7 @@ func (n *Node) Shutdown(ctx context.Context) {
 	n.logger.Info("shutting down")
 	n.shutdown <- struct{}{}
 	close(n.shutdown)
-	if err := n.transport.Shutdown(ctx); err != nil {
+	if err := n.transport.ShutdownServer(ctx); err != nil {
 		n.logger.Error("could not shutdown HTTP server", "error", err.Error())
 	}
 }
@@ -256,7 +256,8 @@ func (n *Node) eventLoop(ctx context.Context) {
 	requestVoteResponse := make(chan RequestVoteResult)
 	defer close(requestVoteResponse)
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
-	defer close(appendEntriesResponse)
+	// TODO uncomment
+	// defer close(appendEntriesResponse)
 
 	// defer n.electionTimer.Stop()
 	// defer n.heartbeatTimer.Stop()
