@@ -269,7 +269,6 @@ eventLoop:
 		select {
 		case <-n.shutdown:
 			n.logger.Info("shut down event loop")
-			cancel()
 			break eventLoop
 
 		case appendEntries := <-n.appendEntriesRpc:

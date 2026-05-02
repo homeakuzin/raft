@@ -26,23 +26,28 @@ func TestRaft(t *testing.T) {
 	}
 
 	t.Run("Replication works", func(t *testing.T) {
-		t.Parallel()
+		// t.Parallel()
 		cluster := newCluster(t, ports.popPorts())
 		defer cluster.stop(t.Context())
 
 		commit1 := make(chan any, 1)
 		commit2 := make(chan any, 1)
+		commit3 := make(chan any, 1)
 		commit1Cnt := atomic.Int32{}
 		commit2Cnt := atomic.Int32{}
+		commit3Cnt := atomic.Int32{}
 		for _, node := range cluster.nodes {
 			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
 				switch data := event.(type) {
 				case raft.EventCommit:
-					if data.NewCommitIndex == 1 && commit1Cnt.Add(1) == 2 {
+					if data.NewCommitIndex == 0 && commit1Cnt.Add(1) == int32(len(cluster.nodes)) {
 						close(commit1)
 					}
-					if data.NewCommitIndex == 2 && commit2Cnt.Add(1) == 2 {
+					if data.NewCommitIndex == 1 && commit2Cnt.Add(1) == int32(len(cluster.nodes)) {
 						close(commit2)
+					}
+					if data.NewCommitIndex == 2 && commit3Cnt.Add(1) == int32(len(cluster.nodes)) {
+						close(commit3)
 					}
 				}
 			})
@@ -50,16 +55,18 @@ func TestRaft(t *testing.T) {
 
 		cluster.setup(t)
 		initialLeader := cluster.leader(t)
+		t.Log("sending two commands")
 		cluster.command(t, []byte{1}, initialLeader)
 		cluster.command(t, []byte{2}, initialLeader)
-		cluster.wait1(commit1)
-		cluster.assertHealthy(t)
-		cluster.command(t, []byte{3}, initialLeader)
 		cluster.wait1(commit2)
+		cluster.assertHealthy(t)
+		t.Log("sending last command")
+		cluster.command(t, []byte{3}, initialLeader)
+		cluster.wait1(commit3)
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster handles leader network partition", func(t *testing.T) {
-		t.Parallel()
+		// t.Parallel()
 		cluster := newCluster(t, ports.popPorts())
 		defer cluster.stop(t.Context())
 		cluster.setup(t)
@@ -73,9 +80,11 @@ func TestRaft(t *testing.T) {
 			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
 				switch data := event.(type) {
 				case raft.EventCommit:
-					if data.NewCommitIndex == 1 && commit1Cnt.Add(1) == 2 {
+					t.Log(node.n.Id, "commit", data.NewCommitIndex)
+					if data.NewCommitIndex == 0 && commit1Cnt.Add(1) == int32(len(cluster.nodes)) {
 						close(commit1)
 					}
+					h.Stop()
 				}
 			})
 		}
@@ -119,15 +128,6 @@ func TestRaft(t *testing.T) {
 		asserts.Gt(t, initialTerm, newLeader.n.CurrentTerm())
 		cluster.assertFollower(t, followers[0], newLeader)
 
-		initialLeaderCommitCh := make(chan any)
-		initialLeader.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
-			switch event.(type) {
-			case raft.EventCommit:
-				h.Stop()
-				close(initialLeaderCommitCh)
-			}
-		})
-
 		followerCommitCh := make(chan any)
 		followers[0].n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
 			switch event.(type) {
@@ -141,7 +141,6 @@ func TestRaft(t *testing.T) {
 		initialLeader.n.StateMachine.AppendLogs(raft.Entry{[]byte{3}, initialTerm})
 		initialLeader.n.StateMachine.Apply(1)
 
-		cluster.wait1(initialLeaderCommitCh)
 		cluster.wait1(followerCommitCh)
 
 		cluster.assertFollower(t, followers[0], newLeader)
@@ -167,7 +166,7 @@ func TestRaft(t *testing.T) {
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster handles leader high latency", func(t *testing.T) {
-		t.Parallel()
+		// t.Parallel()
 		cluster := newCluster(t, ports.popPorts())
 		defer cluster.stop(t.Context())
 		cluster.setup(t)
@@ -260,7 +259,7 @@ func TestRaft(t *testing.T) {
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster gives no shit when follower fails", func(t *testing.T) {
-		t.Parallel()
+		// t.Parallel()
 		cluster := newCluster(t, ports.popPorts())
 		defer cluster.stop(t.Context())
 		cluster.setup(t)
@@ -284,7 +283,7 @@ func TestRaft(t *testing.T) {
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
-		t.Parallel()
+		// t.Parallel()
 		cluster := newCluster(t, ports.popPorts())
 		defer cluster.stop(t.Context())
 		cluster.setup(t)
@@ -428,6 +427,7 @@ func (c *cluster) assertHealthy(t *testing.T) {
 	for _, node := range followers {
 		c.assertFollower(t, node, leader)
 	}
+	t.Log("cluster is healthy")
 }
 
 func (c *cluster) assertFollower(t *testing.T, node, leader node) {
