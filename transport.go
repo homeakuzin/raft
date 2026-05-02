@@ -17,8 +17,8 @@ type RPCClient interface {
 }
 
 type RaftProtocol interface {
-	RequestVote(RequestVote) RequestVoteResult
-	AppendEntries(AppendEntries) AppendEntriesResult
+	RequestVote(RequestVote) (RequestVoteResult, error)
+	AppendEntries(AppendEntries) (AppendEntriesResult, error)
 }
 
 type RPCServer interface {
@@ -59,7 +59,12 @@ func (t *httpTransport) handlerRequestVote(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(400)
 		return
 	}
-	response := protocol.RequestVote(requestVote)
+	response, err := protocol.RequestVote(requestVote)
+	if err != nil {
+		t.logger.Error("could not handle RequestVote RPC", "error", err.Error())
+		w.WriteHeader(500)
+		return
+	}
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		t.logger.Info("could not serialize response body", "error", err.Error())
@@ -86,7 +91,12 @@ func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(400)
 		return
 	}
-	response := protocol.AppendEntries(appendEntries)
+	response, err := protocol.AppendEntries(appendEntries)
+	if err != nil {
+		t.logger.Error("could not handle AppendEntries RPC", "error", err.Error())
+		w.WriteHeader(500)
+		return
+	}
 	responseBody, err := json.Marshal(&response)
 	if err != nil {
 		t.logger.Info("could not serialize response body", "error", err.Error())

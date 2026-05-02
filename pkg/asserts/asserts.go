@@ -2,6 +2,7 @@ package asserts
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -58,10 +59,10 @@ func ErrNil(t testing.TB, err error) {
 	}
 }
 
-func SliceEx[E comparable](t testing.TB, expected, actual []E, message string) {
+func SliceEx[E comparable](t testing.TB, expected, actual []E, message string, args ...any) {
 	t.Helper()
 	if !slices.Equal(expected, actual) {
-		t.Fatalf("assertion failed: %s", message)
+		t.Fatalf("assertion failed: %s", fmt.Sprintf(message, args...))
 	}
 }
 
@@ -86,10 +87,10 @@ func NotEqual[T comparable](t testing.TB, expected, actual T) {
 	}
 }
 
-func EqualEx[T comparable](t testing.TB, expected, actual T, message string) {
+func EqualEx[T comparable](t testing.TB, expected, actual T, message string, args ...any) {
 	t.Helper()
 	if expected != actual {
-		t.Fatalf("assertion failed: %s", message)
+		t.Fatalf("assertion failed: %s", fmt.Sprintf(message, args...))
 	}
 }
 

@@ -35,6 +35,7 @@ type clientRequest struct {
 // TODO return errors from exposed functions as user may be dumb
 type Node struct {
 	Id               NodeId
+	runCtx           context.Context
 	transport        Transport
 	mu               sync.Mutex
 	votedFor         NodeId
@@ -116,8 +117,12 @@ func (n *Node) incrementTerm() int {
 
 func (n *Node) setCurrentTerm(term int) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	was := n.currentTerm
 	n.currentTerm = term
+	n.mu.Unlock()
+	if was != term {
+		n.dispatchEvent(EventTerm{term})
+	}
 }
 
 func (n *Node) setState(s State) State {
@@ -179,16 +184,34 @@ func (n *Node) ClientCommand(ctx context.Context, command []byte) {
 	}
 }
 
-func (n *Node) RequestVote(requestVote RequestVote) RequestVoteResult {
+func (n *Node) RequestVote(requestVote RequestVote) (RequestVoteResult, error) {
 	responseCh := make(chan RequestVoteResult)
-	n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}
-	return <-responseCh
+	select {
+	case <-n.runCtx.Done():
+		return RequestVoteResult{}, n.runCtx.Err()
+	case n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}:
+	}
+	select {
+	case <-n.runCtx.Done():
+		return RequestVoteResult{}, n.runCtx.Err()
+	case r := <-responseCh:
+		return r, nil
+	}
 }
 
-func (n *Node) AppendEntries(appendEntries AppendEntries) AppendEntriesResult {
+func (n *Node) AppendEntries(appendEntries AppendEntries) (AppendEntriesResult, error) {
 	responseCh := make(chan AppendEntriesResult)
-	n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}
-	return <-responseCh
+	select {
+	case <-n.runCtx.Done():
+		return AppendEntriesResult{}, n.runCtx.Err()
+	case n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}:
+	}
+	select {
+	case <-n.runCtx.Done():
+		return AppendEntriesResult{}, n.runCtx.Err()
+	case r := <-responseCh:
+		return r, nil
+	}
 }
 
 func (n *Node) Run() error {
@@ -211,10 +234,13 @@ func (n *Node) Run() error {
 	n.heartbeatTimer.Stop()
 	defer n.electionTimer.Stop()
 	defer n.heartbeatTimer.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n.runCtx = ctx
 
 	n.mu.Unlock()
 	n.logger.Info("starting event loop")
-	n.eventLoop()
+	n.eventLoop(n.runCtx)
 	n.logger.Info("stopped event loop")
 	n.setState(Dead)
 	return nil
@@ -227,7 +253,7 @@ type appendEntriesFollowerResult struct {
 	id      NodeId
 }
 
-func (n *Node) eventLoop() {
+func (n *Node) eventLoop(ctx context.Context) {
 	requestVoteResponse := make(chan RequestVoteResult)
 	defer close(requestVoteResponse)
 	appendEntriesResponse := make(chan appendEntriesFollowerResult)
@@ -236,14 +262,14 @@ func (n *Node) eventLoop() {
 	// defer n.electionTimer.Stop()
 	// defer n.heartbeatTimer.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 eventLoop:
 	for {
 		select {
 		case <-n.shutdown:
 			n.logger.Info("shut down event loop")
-			// cancel()
+			cancel()
 			break eventLoop
 
 		case appendEntries := <-n.appendEntriesRpc:
@@ -329,6 +355,7 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 				n.StateMachine.SetCommitIndex(newCommitIndex)
 				n.StateMachine.Apply(n.StateMachine.CommitIndex())
 				appendEntriesResult.client <- n.StateMachine.CommitIndex()
+				n.dispatchEvent(EventCommit{newCommitIndex})
 			}
 		}
 	} else {
@@ -341,7 +368,10 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 			if err != nil {
 				n.logger.Error("could not reissue AppendEntries", "dest", appendEntriesResult.id, "error", err.Error())
 			} else {
-				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}
+				select {
+				case <-ctx.Done():
+				case appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, appendEntriesResult.client, appendEntriesResult.id}:
+				}
 			}
 		}()
 	}
@@ -426,10 +456,6 @@ func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
 	return response
 }
 
-func (n *Node) Debug() {
-	n.debug = true
-}
-
 // Receiver implementation:
 // 1. Reply false if term < currentTerm (§5.1)
 // 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -467,7 +493,7 @@ func (n *Node) appendEntriesRPC(appendEntries AppendEntries) AppendEntriesResult
 		n.StateMachine.Apply(actualCommit)
 		n.StateMachine.SetCommitIndex(actualCommit)
 		n.logger.Info("Applied new commit index", "value", actualCommit)
-		n.dispatchEvent(EventFollowerCommit{actualCommit})
+		n.dispatchEvent(EventCommit{actualCommit})
 	}
 	response.Success = true
 	return response
@@ -533,7 +559,9 @@ func (n *Node) becomeLeader() {
 }
 
 func (n *Node) dispatchEvent(event any) {
-	n.mu.Lock()
+	if !n.mu.TryLock() {
+		panic("Node.dispatchEvent with active lock")
+	}
 	handlers := make([]*EventHandler, len(n.eventHandlers))
 	copy(handlers, n.eventHandlers)
 	n.mu.Unlock()

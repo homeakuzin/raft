@@ -18,6 +18,10 @@ type EventBecomeFollower struct {
 type EventBecomeLeader struct {
 }
 
-type EventFollowerCommit struct {
+type EventCommit struct {
 	NewCommitIndex int
+}
+
+type EventTerm struct {
+	NewTerm int
 }
