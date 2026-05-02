@@ -438,7 +438,9 @@ func newCluster(t testing.TB, ports []int) *cluster {
 	for i := range ports {
 		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
-		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+		logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
 		transport := &transport{actual: raft.HTTPTransport(id, peers, logger), cond: networkConditions{}}
 		transport.cond.unavailableNode.Store(-1)
 		n := raft.NewNode(id, peers, transport, storage, logger)
