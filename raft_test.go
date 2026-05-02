@@ -338,14 +338,58 @@ func TestRaft(t *testing.T) {
 		defer cluster.stop(t.Context())
 		cluster.setup(t)
 
+		commit1 := make(chan any, 1)
+		commit1Cnt := atomic.Int32{}
+		for _, node := range cluster.nodes {
+			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+				switch data := event.(type) {
+				case raft.EventCommit:
+					if data.NewCommitIndex == 0 && commit1Cnt.Add(1) == int32(len(cluster.nodes)) {
+						close(commit1)
+					}
+					h.Stop()
+				}
+			})
+		}
+
 		initialLeader := cluster.leader(t)
 		cluster.command(t, []byte{1}, initialLeader)
-		cluster.wait()
+		cluster.wait1(commit1)
 		cluster.assertHealthy(t)
+
+		initialFollowers := cluster.getNodes(raft.Follower)
+		candidateCh := make(chan any, 2)
+		followerCh := make(chan any)
+		leaderCh := make(chan any)
+		for _, node := range initialFollowers {
+			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+				switch data := event.(type) {
+				case raft.EventBecomeCandidate:
+					candidateCh <- data
+					h.Stop()
+				}
+			})
+			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+				switch event.(type) {
+				case raft.EventBecomeFollower:
+					close(followerCh)
+					h.Stop()
+				}
+			})
+			node.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+				switch event.(type) {
+				case raft.EventBecomeLeader:
+					close(leaderCh)
+					h.Stop()
+				}
+			})
+		}
 
 		initialTerm := initialLeader.n.CurrentTerm()
 		initialLeader.n.Shutdown(t.Context())
-		cluster.wait()
+		cluster.wait1(candidateCh)
+		cluster.wait1(leaderCh)
+		cluster.wait1(followerCh)
 
 		leaders := cluster.getNodes(raft.Leader)
 		followers := cluster.getNodes(raft.Follower)
@@ -356,9 +400,41 @@ func TestRaft(t *testing.T) {
 		asserts.Gt(t, initialTerm, newTerm)
 		cluster.assertFollower(t, followers[0], leaders[0])
 
-		cluster.command(t, []byte{2}, leaders[0])
+		leaderCommit := make(chan any)
+		leaders[0].n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch data := event.(type) {
+			case raft.EventCommit:
+				if data.NewCommitIndex == 1 {
+					close(leaderCommit)
+					h.Stop()
+				}
+			}
+		})
+		followerCommit := make(chan any)
+		followers[0].n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch data := event.(type) {
+			case raft.EventCommit:
+				if data.NewCommitIndex == 1 {
+					close(followerCommit)
+					h.Stop()
+				}
+			}
+		})
+		initialLeaderCommit := make(chan any)
+		initialLeader.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch data := event.(type) {
+			case raft.EventCommit:
+				if data.NewCommitIndex == 1 {
+					close(initialLeaderCommit)
+					h.Stop()
+				}
+			}
+		})
 
-		cluster.wait()
+		t.Log("sending command to leader", leaders[0].n.Id)
+		cluster.command(t, []byte{2}, leaders[0])
+		cluster.wait1(leaderCommit)
+		cluster.wait1(followerCommit)
 		cluster.assertFollower(t, followers[0], leaders[0])
 
 		dead := cluster.getNodes(raft.Dead)
@@ -366,7 +442,7 @@ func TestRaft(t *testing.T) {
 		asserts.Equal(t, initialLeader, dead[0])
 
 		go initialLeader.n.Run()
-		cluster.wait()
+		cluster.wait1(initialLeaderCommit)
 
 		cluster.assertHealthy(t)
 	})
@@ -558,10 +634,6 @@ func (c *cluster) stop(ctx context.Context) {
 	}
 }
 
-func (s *cluster) waitFor(d time.Duration) {
-	time.Sleep(d)
-}
-
 func (s *cluster) wait1(ch1 <-chan any) {
 	s.t.Helper()
 	timer := time.NewTimer(time.Millisecond * 1000)
@@ -581,10 +653,6 @@ func (s *cluster) wait2(ch1, ch2 <-chan any) {
 	case <-ch1:
 	case <-ch2:
 	}
-}
-
-func (s *cluster) wait() {
-	s.waitFor(time.Millisecond * 500)
 }
 
 type portsStack struct {
