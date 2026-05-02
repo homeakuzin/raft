@@ -293,22 +293,30 @@ func TestRaft(t *testing.T) {
 		leader.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
 			switch data := event.(type) {
 			case raft.EventCommit:
-				t.Log("leader.NewCommitIndex", data.NewCommitIndex)
 				if data.NewCommitIndex == 2 {
 					close(leaderCommit)
+					h.Stop()
 				}
-				h.Stop()
 			}
 		})
 		followerCommit := make(chan any)
 		followers[1].n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
 			switch data := event.(type) {
 			case raft.EventCommit:
-				t.Log("follower.NewCommitIndex", data.NewCommitIndex)
 				if data.NewCommitIndex == 2 {
 					close(followerCommit)
+					h.Stop()
 				}
-				h.Stop()
+			}
+		})
+		failedFollowerCommit := make(chan any)
+		failedFollower.n.RegisterEventHandler(func(h *raft.EventHandler, event any) {
+			switch data := event.(type) {
+			case raft.EventCommit:
+				if data.NewCommitIndex == 2 {
+					close(failedFollowerCommit)
+					h.Stop()
+				}
 			}
 		})
 
@@ -318,11 +326,10 @@ func TestRaft(t *testing.T) {
 		cluster.command(t, []byte{3}, leader)
 		cluster.wait1(leaderCommit)
 		cluster.wait1(followerCommit)
-		cluster.wait()
 		cluster.assertFollower(t, followers[1], leader)
 
 		go failedFollower.n.Run()
-		cluster.wait()
+		cluster.wait1(failedFollowerCommit)
 		cluster.assertHealthy(t)
 	})
 	t.Run("Cluster recovers after leader failure", func(t *testing.T) {
@@ -439,7 +446,7 @@ func newCluster(t testing.TB, ports []int) *cluster {
 		id := raft.NodeId(i)
 		storage := &storage.ListStorage{}
 		logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
+			// Level: slog.LevelDebug,
 		}))
 		transport := &transport{actual: raft.HTTPTransport(id, peers, logger), cond: networkConditions{}}
 		transport.cond.unavailableNode.Store(-1)

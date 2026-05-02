@@ -352,8 +352,8 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 				n.logger.Info("update commit index", "value", newCommitIndex, "previous", savedCommitIndex)
 				n.StateMachine.SetCommitIndex(newCommitIndex)
 				n.StateMachine.Apply(newCommitIndex)
-				n.dispatchEvent(EventCommit{newCommitIndex})
 				appendEntriesResult.client <- newCommitIndex
+				n.dispatchEvent(EventCommit{newCommitIndex})
 			}
 		}
 	} else {
