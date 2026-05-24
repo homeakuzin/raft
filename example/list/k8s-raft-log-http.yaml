@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: raft-log-http-discovery
+spec:
+  clusterIP: None
+  selector:
+    app: raft-log-http
+  ports:
+    - name: peer
+      port: 2380
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: raft-log-http
+spec:
+  serviceName: "raft-log-http-discovery"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: raft-log-http
+  template:
+    metadata:
+      labels:
+        app: raft-log-http
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: raft-log-http
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: node
+        image: registry.akuzin.tech/raft-log-http
+        env:
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                  fieldPath: metadata.name
+        command: ["/raft-log-http"]
+        args: 
+          - "-authtoken=authtoken"
+          - "-id=$(POD_NAME)"
+          - "-clientnodes="
+          - "-nodes=raft-log-http-0.raft-log-http-discovery:2380,raft-log-http-1.raft-log-http-discovery:2380,raft-log-http-2.raft-log-http-discovery:2380"
+          - "-nodes=raft-log-http-0.raft-log-http-discovery:3380,raft-log-http-1.raft-log-http-discovery:3380,raft-log-http-2.raft-log-http-discovery:3380"

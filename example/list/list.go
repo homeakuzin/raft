@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 
 	"github.com/homeakuzin/raft"
 	"github.com/homeakuzin/raft/storage"
@@ -21,9 +20,8 @@ var flagAuthToken = flag.String("authtoken", "", "HTTP auth token for communicat
 
 func main() {
 	flag.Parse()
-	nodeIdInt, err := strconv.Atoi(*flagNodeId)
-	if err != nil {
-		slog.Error("invalid -id usage", "value", *flagNodeId, "err", err)
+	if *flagNodeId == "" {
+		slog.Error("provide -id")
 		os.Exit(1)
 	}
 	nodes, err := raft.ParseNodesFlag(*flagNodes)
@@ -42,7 +40,7 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	nodeId := raft.NodeId(nodeIdInt)
+	nodeId := raft.NodeId(*flagNodeId)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	list := &storage.ListStorage{}
@@ -70,7 +68,7 @@ func main() {
 		if node.State() != raft.Leader {
 			nextId := raft.EmptyId
 			for id := range clientNodes {
-				if id != nodeId && r.Header.Get("X-Raft-Next-Node"+strconv.Itoa(int(id))) == "" {
+				if id != nodeId && r.Header.Get("X-Raft-Next-Node-"+string(id)) == "" {
 					nextId = id
 					break
 				}
@@ -89,7 +87,7 @@ func main() {
 				return
 			}
 			req.Header = r.Header
-			req.Header.Set("X-Raft-Next-Node"+strconv.Itoa(int(nextId)), "1")
+			req.Header.Set("X-Raft-Next-Node"+string(nextId), "1")
 			client := http.Client{}
 			resp, err := client.Do(req)
 			if err != nil {
