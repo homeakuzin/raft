@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,7 +111,9 @@ func TestClusterHandlesLeaderNetworkPartition(t *testing.T) {
 
 	t.Logf("Partition leader %s", initialLeader.n.Id)
 	for _, node := range cluster.nodes {
-		node.network.unavailableNode.Store(int32(initialLeader.n.Id))
+		node.network.unavailableNodeMu.Lock()
+		node.network.unavailableNode = initialLeader.n.Id
+		node.network.unavailableNodeMu.Unlock()
 	}
 	cluster.wait1(newLeaderCh)
 
@@ -163,7 +166,9 @@ func TestClusterHandlesLeaderNetworkPartition(t *testing.T) {
 		}
 	})
 	for _, node := range cluster.nodes {
-		node.network.unavailableNode.Store(-1)
+		node.network.unavailableNodeMu.Lock()
+		node.network.unavailableNode = raft.EmptyId
+		node.network.unavailableNodeMu.Unlock()
 	}
 	cluster.wait1(initialLeaderCommitCh1)
 	cluster.assertHealthy(t)
@@ -333,7 +338,7 @@ func TestClusterGivesNoShitWhenFollowerFails(t *testing.T) {
 	cluster.wait1(followerCommit)
 	cluster.assertFollower(t, followers[1], leader)
 
-	go failedFollower.n.Run()
+	go failedFollower.n.Run(t.Context())
 	cluster.wait1(failedFollowerCommit)
 	cluster.assertHealthy(t)
 }
@@ -447,7 +452,7 @@ func TestClusterRecoversAfterLeaderFailure(t *testing.T) {
 	asserts.Len(t, 1, dead)
 	asserts.Equal(t, initialLeader, dead[0])
 
-	go initialLeader.n.Run()
+	go initialLeader.n.Run(t.Context())
 	cluster.wait1(initialLeaderCommit)
 
 	cluster.assertHealthy(t)
@@ -460,8 +465,9 @@ type node struct {
 }
 
 type networkConditions struct {
-	unavailableNode atomic.Int32
-	latency         atomic.Int64
+	unavailableNodeMu sync.Mutex
+	unavailableNode   raft.NodeId
+	latency           atomic.Int64
 }
 
 type wrapProtocol struct {
@@ -487,7 +493,9 @@ type transport struct {
 }
 
 func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote, node raft.NodeId) (raft.RequestVoteResult, error) {
-	unavailableNodeId := raft.NodeId(t.cond.unavailableNode.Load())
+	t.cond.unavailableNodeMu.Lock()
+	unavailableNodeId := t.cond.unavailableNode
+	t.cond.unavailableNodeMu.Unlock()
 	if unavailableNodeId == node || t.node.n.Id == unavailableNodeId {
 		return raft.RequestVoteResult{}, errors.New("node is unavailable")
 	}
@@ -496,7 +504,9 @@ func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote,
 }
 
 func (t *transport) IssueAppendEntries(ctx context.Context, data raft.AppendEntries, node raft.NodeId) (raft.AppendEntriesResult, error) {
-	unavailableNodeId := raft.NodeId(t.cond.unavailableNode.Load())
+	t.cond.unavailableNodeMu.Lock()
+	unavailableNodeId := t.cond.unavailableNode
+	t.cond.unavailableNodeMu.Unlock()
 	if unavailableNodeId == node || t.node.n.Id == unavailableNodeId {
 		return raft.AppendEntriesResult{}, errors.New("node is unavailable")
 	}
@@ -521,16 +531,18 @@ func newCluster(t testing.TB, ports []int) *cluster {
 	cluster := &cluster{t, make(map[raft.NodeId]node)}
 	peers := make(map[raft.NodeId]string)
 	for i, port := range ports {
-		peers[raft.NodeId(i)] = fmt.Sprintf("127.0.0.1:%d", port)
+		peers["Node"+raft.NodeId(strconv.Itoa(i))] = fmt.Sprintf("127.0.0.1:%d", port)
 	}
 	for i := range ports {
-		id := raft.NodeId(i)
+		id := "Node" + raft.NodeId(strconv.Itoa(i))
 		storage := &storage.ListStorage{}
 		logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			// Level: slog.LevelDebug,
 		}))
 		transport := &transport{actual: raft.HTTPTransport(id, peers, logger, "test"), cond: networkConditions{}}
-		transport.cond.unavailableNode.Store(-1)
+		transport.cond.unavailableNodeMu.Lock()
+		transport.cond.unavailableNode = raft.EmptyId
+		transport.cond.unavailableNodeMu.Unlock()
 		n := raft.NewNode(id, peers, transport, storage, logger)
 		node := node{n, storage, &transport.cond}
 		transport.node = node
@@ -629,7 +641,7 @@ func (c *cluster) setup(t *testing.T) {
 
 func (c *cluster) run() {
 	for _, node := range c.nodes {
-		go node.n.Run()
+		go node.n.Run(c.t.Context())
 	}
 }
 

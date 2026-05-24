@@ -2,10 +2,8 @@ package raft
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math/rand"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -579,14 +577,7 @@ func ParseNodesFlag(nodesStr string) (map[NodeId]string, error) {
 	nodeParts := strings.Split(nodesStr, ";")
 	for i := range nodeParts {
 		idHostAndPort := strings.Split(nodeParts[i], ":")
-		if len(idHostAndPort) != 3 {
-			return nil, fmt.Errorf("expected 3 parts divided by ':', got %d", len(idHostAndPort))
-		}
-		nodeIdInt, err := strconv.Atoi(idHostAndPort[0])
-		if err != nil {
-			return nil, fmt.Errorf("invalid node id %s: %w", idHostAndPort[0], err)
-		}
-		nodes[NodeId(nodeIdInt)] = idHostAndPort[1] + ":" + idHostAndPort[2]
+		nodes[NodeId(idHostAndPort[0])] = idHostAndPort[1] + ":" + idHostAndPort[2]
 	}
 	return nodes, nil
 }

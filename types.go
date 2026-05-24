@@ -32,15 +32,15 @@ type AppendEntriesResult struct {
 	Success bool
 }
 
-type NodeId int
+type NodeId string
 
-const EmptyId NodeId = -1
+const EmptyId NodeId = "-1"
 
 func (id NodeId) String() string {
 	if id == EmptyId {
 		return "None"
 	}
-	return fmt.Sprintf("node-%d", id)
+	return fmt.Sprintf("node-%s", string(id))
 }
 
 type State int
