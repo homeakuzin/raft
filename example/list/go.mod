@@ -1,9 +1,5 @@
-module showcase
+module raft_log_http
 
 go 1.26
 
-require (
-	github.com/homeakuzin/raft v0.0.0
-)
-
-replace github.com/homeakuzin/raft => ../..
+require github.com/homeakuzin/raft v0.1.0 // indirect

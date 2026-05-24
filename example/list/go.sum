@@ -1,0 +1,4 @@
+github.com/homeakuzin/raft v0.0.0-20260419082330-3f30752c9e46 h1:7DHCuDKAmr6VN7jhyUiLIqnegTysNOY16RgXscI+N2E=
+github.com/homeakuzin/raft v0.0.0-20260419082330-3f30752c9e46/go.mod h1:eYJPizArkiV1yUP3Bg+kUqJHzcp7cqMmw+84fDGrmS8=
+github.com/homeakuzin/raft v0.1.0 h1:WCPzWq80ORGQAenluntr06APi1KCr+nWTRCBcW0Lwe0=
+github.com/homeakuzin/raft v0.1.0/go.mod h1:eYJPizArkiV1yUP3Bg+kUqJHzcp7cqMmw+84fDGrmS8=
