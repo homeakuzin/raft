@@ -33,13 +33,14 @@ type Transport interface {
 
 type httpTransport struct {
 	id        NodeId
+	authToken string
 	nodeAddrs map[NodeId]string
 	server    *http.Server
 	logger    *slog.Logger
 }
 
-func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string, logger *slog.Logger) Transport {
-	return &httpTransport{id: id, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
+func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string, logger *slog.Logger, authToken string) Transport {
+	return &httpTransport{id: id, authToken: authToken, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
 }
 
 func (t *httpTransport) ShutdownServer(ctx context.Context) error {
@@ -114,17 +115,20 @@ func (t *httpTransport) handlerAppendEntries(w http.ResponseWriter, r *http.Requ
 func (t *httpTransport) Serve(protocol RaftProtocol) error {
 	handler := http.NewServeMux()
 	handler.HandleFunc("POST /rpc/request-vote", func(w http.ResponseWriter, r *http.Request) {
-		t.handlerRequestVote(w, r, protocol)
+		if t.authenticated(w, r) {
+			t.handlerRequestVote(w, r, protocol)
+		}
 	})
 	handler.HandleFunc("POST /rpc/append-entries", func(w http.ResponseWriter, r *http.Request) {
-		t.handlerAppendEntries(w, r, protocol)
+		if t.authenticated(w, r) {
+			t.handlerAppendEntries(w, r, protocol)
+		}
 	})
 	host := t.nodeAddrs[t.id]
-	t.logger.Info("Running HTTP server", "host", host)
+	t.logger.Info("Running node HTTP server", "host", host)
 	t.server = &http.Server{Addr: host, Handler: handler}
 
-	addr := host
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", host)
 	if err != nil {
 		return err
 	}
@@ -144,6 +148,7 @@ func (t *httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, 
 		return
 	}
 	client := http.Client{}
+	req.Header.Set(httpAuthTokenHeader, t.authToken)
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -176,6 +181,7 @@ func (t *httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntri
 		return result, err
 	}
 	client := http.Client{}
+	req.Header.Set(httpAuthTokenHeader, t.authToken)
 	resp, err := client.Do(req)
 	if err != nil {
 		return result, err
@@ -191,4 +197,14 @@ func (t *httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntri
 	}
 	err = json.Unmarshal(resultBytes, &result)
 	return result, err
+}
+
+const httpAuthTokenHeader = "X-Raft-Auth-Token"
+
+func (t *httpTransport) authenticated(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get(httpAuthTokenHeader) == "" {
+		w.WriteHeader(401)
+		return false
+	}
+	return true
 }

@@ -2,8 +2,11 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -213,7 +216,7 @@ func (n *Node) AppendEntries(appendEntries AppendEntries) (AppendEntriesResult, 
 	}
 }
 
-func (n *Node) Run() error {
+func (n *Node) Run(ctx context.Context) error {
 	if n.State() != Dead {
 		n.logger.Info("node is already running")
 		return nil
@@ -233,7 +236,7 @@ func (n *Node) Run() error {
 	n.heartbeatTimer.Stop()
 	defer n.electionTimer.Stop()
 	defer n.heartbeatTimer.Stop()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	n.runCtx = ctx
 
@@ -569,4 +572,21 @@ func (n *Node) dispatchEvent(event any) {
 			handlers[i].f(handlers[i], event)
 		}
 	}
+}
+
+func ParseNodesFlag(nodesStr string) (map[NodeId]string, error) {
+	nodes := make(map[NodeId]string, 3)
+	nodeParts := strings.Split(nodesStr, ";")
+	for i := range nodeParts {
+		idHostAndPort := strings.Split(nodeParts[i], ":")
+		if len(idHostAndPort) != 3 {
+			return nil, fmt.Errorf("expected 3 parts divided by ':', got %d", len(idHostAndPort))
+		}
+		nodeIdInt, err := strconv.Atoi(idHostAndPort[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid node id %s: %w", idHostAndPort[0], err)
+		}
+		nodes[NodeId(nodeIdInt)] = idHostAndPort[1] + ":" + idHostAndPort[2]
+	}
+	return nodes, nil
 }
