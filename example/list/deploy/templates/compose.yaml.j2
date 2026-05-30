@@ -1,0 +1,14 @@
+services:
+  raft-list:
+    image: "{{ raft_image }}:{{ raft_image_tag }}"
+    restart: unless-stopped
+    ports:
+      - "{{ ansible_host }}:{{ raft_peer_port }}:{{ raft_peer_port }}"
+      - "0.0.0.0:{{ raft_client_port }}:{{ raft_client_port }}"
+    command:
+      - "-nodes={% for host in groups['raft_nodes'] | map('extract', hostvars) | sort(attribute='raft_node_id') %}{{ host.raft_node_id }}:{{ host.ansible_host }}:{{ raft_peer_port }}{% if not loop.last %};{% endif %}{% endfor %}"
+      - "-clientnodes={% for host in groups['raft_nodes'] | map('extract', hostvars) | sort(attribute='raft_node_id') %}{{ host.raft_node_id }}:{{ host.ansible_host }}:{{ raft_client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
+      - "-raftlisten=0.0.0.0:{{ raft_peer_port }}"
+      - "-clientlisten=0.0.0.0:{{ raft_client_port }}"
+      - "-id={{ raft_node_id }}"
+      - {{ ("-authtoken=" ~ raft_auth_token) | to_json }}
