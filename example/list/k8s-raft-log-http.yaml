@@ -1,49 +1,54 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: raft-log-http-discovery
+    name: raft-service
 spec:
-  clusterIP: None
-  selector:
-    app: raft-log-http
-  ports:
-    - name: peer
-      port: 2380
+    clusterIP: None
+    selector:
+        app: raft-node
+    ports:
+        - name: peer
+          port: 4000
+        - name: client
+          port: 4010
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: raft-log-http
+    name: raft-node
 spec:
-  serviceName: "raft-log-http-discovery"
-  replicas: 3
-  selector:
-    matchLabels:
-      app: raft-log-http
-  template:
-    metadata:
-      labels:
-        app: raft-log-http
-    spec:
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchLabels:
-                app: raft-log-http
-            topologyKey: "kubernetes.io/hostname"
-      containers:
-      - name: node
-        image: registry.akuzin.tech/raft-log-http
-        env:
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                  fieldPath: metadata.name
-        command: ["/raft-log-http"]
-        args: 
-          - "-authtoken=authtoken"
-          - "-id=$(POD_NAME)"
-          - "-clientnodes="
-          - "-nodes=raft-log-http-0.raft-log-http-discovery:2380,raft-log-http-1.raft-log-http-discovery:2380,raft-log-http-2.raft-log-http-discovery:2380"
-          - "-nodes=raft-log-http-0.raft-log-http-discovery:3380,raft-log-http-1.raft-log-http-discovery:3380,raft-log-http-2.raft-log-http-discovery:3380"
+    serviceName: raft-service
+    replicas: 3
+    selector:
+        matchLabels:
+            app: raft-node
+    template:
+        metadata:
+            labels:
+                app: raft-node
+        spec:
+            imagePullSecrets:
+                - name: registry-credentials
+            containers:
+                - name: raft-container
+                  image: registry.akuzin.tech/raft-log-http:latest
+                  env:
+                      - name: POD_ID
+                        valueFrom:
+                            fieldRef:
+                                fieldPath: metadata.name
+                      - name: AUTHTOKEN
+                        value: "secret"
+                      - name: NODES
+                        value: "raft-node-0:raft-node-0.raft-service:4000;raft-node-1:raft-node-1.raft-service:4000;raft-node-2:raft-node-2.raft-service:4000"
+                      - name: CLIENT_NODES
+                        value: "raft-node-0:raft-node-0.raft-service:4010;raft-node-1:raft-node-1.raft-service:4010;raft-node-2:raft-node-2.raft-service:4010"
+                  command: ["/raft-log-http"]
+                  args:
+                      - "-nodes=$(NODES)"
+                      - "-raftlisten=0.0.0.0:4000"
+                      - "-clientlisten=0.0.0.0:4010"
+                      - "-clientnodes=$(CLIENT_NODES)"
+                      - "-id=$(POD_ID)"
+                      - "-authtoken=$(AUTHTOKEN)"
+---
