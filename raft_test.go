@@ -539,7 +539,7 @@ func newCluster(t testing.TB, ports []int) *cluster {
 		logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			// Level: slog.LevelDebug,
 		}))
-		transport := &transport{actual: raft.HTTPTransport(id, peers, logger, "test"), cond: networkConditions{}}
+		transport := &transport{actual: raft.HTTPTransport(id, peers[id], peers, logger, "test"), cond: networkConditions{}}
 		transport.cond.unavailableNodeMu.Lock()
 		transport.cond.unavailableNode = raft.EmptyId
 		transport.cond.unavailableNodeMu.Unlock()

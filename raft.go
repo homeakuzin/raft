@@ -222,8 +222,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if err := n.transport.Serve(n); err != nil {
-		n.logger.Error("could not run node server", "error", err.Error())
-		return err
+		return fmt.Errorf("could not run node server: %w", err)
 	}
 	n.mu.Lock()
 	n.state = Follower

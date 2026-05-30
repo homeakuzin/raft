@@ -32,15 +32,16 @@ type Transport interface {
 }
 
 type httpTransport struct {
-	id        NodeId
-	authToken string
-	nodeAddrs map[NodeId]string
-	server    *http.Server
-	logger    *slog.Logger
+	id         NodeId
+	listenAddr string
+	authToken  string
+	nodeAddrs  map[NodeId]string
+	server     *http.Server
+	logger     *slog.Logger
 }
 
-func HTTPTransport(id NodeId, nodeAddrs map[NodeId]string, logger *slog.Logger, authToken string) Transport {
-	return &httpTransport{id: id, authToken: authToken, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
+func HTTPTransport(id NodeId, listenAddr string, nodeAddrs map[NodeId]string, logger *slog.Logger, authToken string) Transport {
+	return &httpTransport{id: id, listenAddr: listenAddr, authToken: authToken, nodeAddrs: nodeAddrs, logger: logger.With("node", id.String())}
 }
 
 func (t *httpTransport) ShutdownServer(ctx context.Context) error {
@@ -124,11 +125,10 @@ func (t *httpTransport) Serve(protocol RaftProtocol) error {
 			t.handlerAppendEntries(w, r, protocol)
 		}
 	})
-	host := t.nodeAddrs[t.id]
-	t.logger.Info("Running node HTTP server", "host", host)
-	t.server = &http.Server{Addr: host, Handler: handler}
+	t.logger.Info("Running node HTTP server", "host", t.listenAddr)
+	t.server = &http.Server{Addr: t.listenAddr, Handler: handler}
 
-	ln, err := net.Listen("tcp", host)
+	ln, err := net.Listen("tcp", t.listenAddr)
 	if err != nil {
 		return err
 	}
