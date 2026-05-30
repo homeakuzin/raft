@@ -6,9 +6,31 @@ services:
       - "{{ ansible_host }}:{{ raft_peer_port }}:{{ raft_peer_port }}"
       - "0.0.0.0:{{ raft_client_port }}:{{ raft_client_port }}"
     command:
+      - "/raft-log-http"
       - "-nodes={% for host in groups['raft_nodes'] | map('extract', hostvars) | sort(attribute='raft_node_id') %}{{ host.raft_node_id }}:{{ host.ansible_host }}:{{ raft_peer_port }}{% if not loop.last %};{% endif %}{% endfor %}"
       - "-clientnodes={% for host in groups['raft_nodes'] | map('extract', hostvars) | sort(attribute='raft_node_id') %}{{ host.raft_node_id }}:{{ host.ansible_host }}:{{ raft_client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
       - "-raftlisten=0.0.0.0:{{ raft_peer_port }}"
       - "-clientlisten=0.0.0.0:{{ raft_client_port }}"
       - "-id={{ raft_node_id }}"
       - {{ ("-authtoken=" ~ raft_auth_token) | to_json }}
+
+  alloy:
+    image: "{{ alloy_image }}:{{ alloy_image_tag }}"
+    restart: unless-stopped
+    command:
+      - run
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy.config:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    secrets:
+      - loki_password
+
+secrets:
+  loki_password:
+    file: ./secrets/loki_password
+
+volumes:
+  alloy-data:

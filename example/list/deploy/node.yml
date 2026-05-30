@@ -1,5 +1,6 @@
 ---
 - name: Deploy Raft list node
+  serial: 1
   hosts: raft_nodes
   become: true
 
@@ -21,6 +22,16 @@
           - registry_username | length > 0
           - registry_password is defined
           - registry_password | length > 0
+          - loki_push_url is defined
+          - loki_push_url | length > 0
+          - loki_push_url != 'replace-me'
+          - loki_push_url is match('^https://.+/loki/api/v1/push$')
+          - loki_username is defined
+          - loki_username | length > 0
+          - loki_username != 'replace-me'
+          - loki_password is defined
+          - loki_password | length > 0
+          - loki_password != 'replace-me'
         fail_msg: Configure inventory/hosts.yml and encrypted group_vars/all/vault.yml before deploying.
 
     - name: Select Docker repository architecture
@@ -77,6 +88,25 @@
         path: "{{ raft_deploy_dir }}"
         state: directory
         mode: "0755"
+
+    - name: Create deployment secrets directory
+      ansible.builtin.file:
+        path: "{{ raft_deploy_dir }}/secrets"
+        state: directory
+        mode: "0700"
+
+    - name: Render Alloy configuration
+      ansible.builtin.template:
+        src: templates/alloy.config.j2
+        dest: "{{ raft_deploy_dir }}/alloy.config"
+        mode: "0600"
+
+    - name: Write Loki password
+      ansible.builtin.copy:
+        content: "{{ loki_password }}"
+        dest: "{{ raft_deploy_dir }}/secrets/loki_password"
+        mode: "0600"
+      no_log: true
 
     - name: Render Docker Compose project
       ansible.builtin.template:

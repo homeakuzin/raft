@@ -1,3 +1,6 @@
 raft_auth_token: replace-me
 registry_username: replace-me
 registry_password: replace-me
+loki_push_url: https://loki.example.com/loki/api/v1/push
+loki_username: replace-me
+loki_password: replace-me

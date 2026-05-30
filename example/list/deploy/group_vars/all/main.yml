@@ -4,3 +4,5 @@ raft_image_tag: latest
 raft_deploy_dir: /opt/raft-list
 raft_peer_port: 4000
 raft_client_port: 4010
+alloy_image: grafana/alloy
+alloy_image_tag: latest

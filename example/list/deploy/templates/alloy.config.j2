@@ -1,0 +1,34 @@
+discovery.docker "local" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "raft_list" {
+  targets = discovery.docker.local.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "raft-list"
+    action        = "keep"
+  }
+}
+
+loki.source.docker "raft_list" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.raft_list.output
+  labels     = {
+    service = "raft-list",
+    node_id = {{ raft_node_id | to_json }},
+  }
+  forward_to = [loki.write.central.receiver]
+}
+
+loki.write "central" {
+  endpoint {
+    url = {{ loki_push_url | to_json }}
+
+    basic_auth {
+      username      = {{ loki_username | to_json }}
+      password_file = "/run/secrets/loki_password"
+    }
+  }
+}
