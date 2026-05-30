@@ -2,7 +2,6 @@ package raft
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 type RequestVote struct {
@@ -40,7 +39,7 @@ func (id NodeId) String() string {
 	if id == EmptyId {
 		return "None"
 	}
-	return fmt.Sprintf("node-%s", string(id))
+	return string(id)
 }
 
 type State int

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"strings"
@@ -577,6 +578,9 @@ func ParseNodesFlag(nodesStr string) (map[NodeId]string, error) {
 	nodeParts := strings.Split(nodesStr, ";")
 	for i := range nodeParts {
 		idHostAndPort := strings.Split(nodeParts[i], ":")
+		if len(idHostAndPort) != 3 {
+			return nil, fmt.Errorf("invalid peer configuration: %s", nodeParts[i])
+		}
 		nodes[NodeId(idHostAndPort[0])] = idHostAndPort[1] + ":" + idHostAndPort[2]
 	}
 	return nodes, nil
