@@ -50,7 +50,11 @@ func main() {
 
 	transport := raft.HTTPTransport(nodeId, *flagRaftListen, nodes, logger, *flagAuthToken)
 	node := raft.NewNode(nodeId, nodes, transport, list, logger)
-	logger.Info("starting cluster node", "id", nodeId)
+	hostname, err := os.Hostname()
+	if err != nil {
+		slog.Error("could not get hostname", "err", err)
+	}
+	logger.Info("starting cluster node", "id", nodeId, "hostname", hostname)
 	nodeCh := make(chan struct{})
 	go func() {
 		if err := node.Run(ctx); err != nil {
