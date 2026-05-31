@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"io"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -15,7 +14,7 @@ import (
 
 	"github.com/homeakuzin/raft"
 	"github.com/homeakuzin/raft/storage"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var flagRaftListen = flag.String("raftlisten", "", "Listen raft connections at")
@@ -81,7 +80,7 @@ func loadNode(logger *slog.Logger, wg *sync.WaitGroup, id raft.NodeId, addr stri
 			logsSent++
 			body := make([]byte, params.BodySize)
 			for i := range len(body) {
-				body[i] = byte(rand.Intn(256))
+				body[i] = byte(rand.Intn(94) + 33)
 			}
 			req, _ = http.NewRequest("POST", "http://"+addr, bytes.NewBuffer([]byte(body)))
 		}
@@ -131,6 +130,11 @@ func runNode() {
 
 	transport := raft.HTTPTransport(nodeId, *flagRaftListen, nodes, logger, *flagAuthToken)
 	node := raft.NewNode(nodeId, nodes, transport, list, logger)
+	metrics, err := newRaftMetrics(prometheus.DefaultRegisterer, node, string(nodeId))
+	if err != nil {
+		logger.Error("could not register metrics", "err", err)
+		os.Exit(1)
+	}
 	hostname, err := os.Hostname()
 	if err != nil {
 		slog.Error("could not get hostname", "err", err)
@@ -145,61 +149,7 @@ func runNode() {
 		}
 	}()
 
-	handler := http.NewServeMux()
-	handler.Handle("GET /metrics", promhttp.Handler())
-	handler.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("GET request", "client", r.RemoteAddr, "userAgent", r.UserAgent())
-		w.Write(list.Last())
-	})
-	handler.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("POST request", "client", r.RemoteAddr, "userAgent", r.UserAgent())
-		// TODO move into raft package
-		if node.State() != raft.Leader {
-			nextId := raft.EmptyId
-			for id := range clientNodes {
-				if id != nodeId && r.Header.Get("X-Raft-Next-Node-"+string(id)) == "" {
-					nextId = id
-					break
-				}
-			}
-			if nextId == raft.EmptyId {
-				w.WriteHeader(500)
-				w.Write([]byte("no more nodes to try"))
-				logger.Info("no more nodes to try")
-				return
-			}
-			logger.Info("not a leader. try next node", "next", nextId, "addr", clientNodes[nextId])
-			req, err := http.NewRequest("POST", "http://"+clientNodes[nextId], r.Body)
-			if err != nil {
-				w.WriteHeader(500)
-				logger.Error("could not build next node request", "err", err)
-				return
-			}
-			req.Header = r.Header
-			req.Header.Set("X-Raft-Next-Node"+string(nextId), "1")
-			client := http.Client{}
-			resp, err := client.Do(req)
-			if err != nil {
-				w.WriteHeader(500)
-				logger.Error("failed next node request", "err", err)
-				return
-			}
-			w.WriteHeader(resp.StatusCode)
-			if _, err := io.Copy(w, resp.Body); err != nil {
-				logger.Error("could not read next node body", "err", err)
-				return
-			}
-			return
-		}
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			logger.Error("could not read request body", "err", err)
-			w.WriteHeader(500)
-			return
-		}
-		node.ClientCommand(r.Context(), body)
-	})
+	handler := newListHandler(logger, node, nodeId, clientNodes, list, metrics)
 	addr := clientNodes[nodeId]
 	ln, err := net.Listen("tcp", *flagClientListen)
 	if err != nil {
