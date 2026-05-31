@@ -32,3 +32,26 @@ loki.write "central" {
     }
   }
 }
+
+prometheus.scrape "raft_list" {
+  targets = [
+    {
+      "__address__" = "raft-list:{{ raft_client_port }}",
+      "node_id"     = {{ raft_node_id | to_json }},
+    },
+  ]
+  metrics_path    = "/metrics"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+prometheus.remote_write "central" {
+  endpoint {
+    url = {{ prometheus_remote_write_url | to_json }}
+
+    basic_auth {
+      username      = {{ loki_username | to_json }}
+      password_file = "/run/secrets/loki_password"
+    }
+  }
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/homeakuzin/raft"
 	"github.com/homeakuzin/raft/storage"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var flagRaftListen = flag.String("raftlisten", "", "Listen raft connections at")
@@ -60,6 +61,7 @@ func main() {
 	}()
 
 	handler := http.NewServeMux()
+	handler.Handle("GET /metrics", promhttp.Handler())
 	handler.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("GET request", "client", r.RemoteAddr, "userAgent", r.UserAgent())
 		w.Write(list.Last())

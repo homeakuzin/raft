@@ -32,6 +32,10 @@
           - loki_password is defined
           - loki_password | length > 0
           - loki_password != 'replace-me'
+          - prometheus_remote_write_url is defined
+          - prometheus_remote_write_url | length > 0
+          - prometheus_remote_write_url != 'replace-me'
+          - prometheus_remote_write_url is match('^https://.+/api/v1/write$')
         fail_msg: Configure inventory/hosts.yml and encrypted group_vars/all/vault.yml before deploying.
 
     - name: Select Docker repository architecture
