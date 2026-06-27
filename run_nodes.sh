@@ -16,9 +16,6 @@ cleanup() {
 # Set up trap
 trap cleanup SIGINT SIGTERM
 
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$ROOT_DIR" || exit 1
-
 # Build
 echo "Building..."
 EXECUTABLE=list
