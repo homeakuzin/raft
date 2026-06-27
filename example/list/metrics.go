@@ -82,6 +82,7 @@ type nodeStateCollector struct {
 	node     *raft.Node
 	roleDesc *prometheus.Desc
 	termDesc *prometheus.Desc
+	logsDesc *prometheus.Desc
 }
 
 func newNodeStateCollector(node *raft.Node, constLabels prometheus.Labels) prometheus.Collector {
@@ -99,12 +100,19 @@ func newNodeStateCollector(node *raft.Node, constLabels prometheus.Labels) prome
 			nil,
 			constLabels,
 		),
+		logsDesc: prometheus.NewDesc(
+			"raft_log_entries",
+			"Current number of raft log entries stored on this node.",
+			nil,
+			constLabels,
+		),
 	}
 }
 
 func (c *nodeStateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.roleDesc
 	ch <- c.termDesc
+	ch <- c.logsDesc
 }
 
 func (c *nodeStateCollector) Collect(ch chan<- prometheus.Metric) {
@@ -117,4 +125,5 @@ func (c *nodeStateCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.roleDesc, prometheus.GaugeValue, value, role.String())
 	}
 	ch <- prometheus.MustNewConstMetric(c.termDesc, prometheus.GaugeValue, float64(c.node.CurrentTerm()))
+	ch <- prometheus.MustNewConstMetric(c.logsDesc, prometheus.GaugeValue, float64(c.node.StateMachine.Len()))
 }

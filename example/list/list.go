@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sync"
 
@@ -25,9 +26,20 @@ var flagNodeId = flag.String("id", "", "Node id")
 var flagAuthToken = flag.String("authtoken", "", "HTTP auth token for communicating between nodes")
 var flagLoadNodes = flag.String("loadnodes", "", "Run load command")
 var flagLoadParams = flag.String("loadparams", "", "Load params (see `type loadParams struct`)")
+var flagProfileAddr = flag.String("profileaddr", "", "Address for pprof server")
 
 func main() {
 	flag.Parse()
+
+	if *flagProfileAddr != "" {
+		slog.Info("running profiler", "addr", *flagProfileAddr)
+		go func() {
+			if err := http.ListenAndServe(*flagProfileAddr, nil); err != nil {
+				slog.Error("could not start profiler", "error", err)
+			}
+		}()
+	}
+
 	if *flagLoadNodes != "" {
 		runLoad()
 	} else {
