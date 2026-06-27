@@ -16,6 +16,8 @@ import (
 	"github.com/homeakuzin/raft"
 	"github.com/homeakuzin/raft/storage"
 	"github.com/prometheus/client_golang/prometheus"
+
+	raftotel "github.com/homeakuzin/raft/pkg/otel"
 )
 
 var flagRaftListen = flag.String("raftlisten", "", "Listen raft connections at")
@@ -27,9 +29,11 @@ var flagAuthToken = flag.String("authtoken", "", "HTTP auth token for communicat
 var flagLoadNodes = flag.String("loadnodes", "", "Run load command")
 var flagLoadParams = flag.String("loadparams", "", "Load params (see `type loadParams struct`)")
 var flagProfileAddr = flag.String("profileaddr", "", "Address for pprof server")
+var flagOtelTraceAddr = flag.String("traceExportAddr", "", "Address to export OpenTelemetry traces")
 
 func main() {
 	flag.Parse()
+	ctx := context.Background()
 
 	if *flagProfileAddr != "" {
 		slog.Info("running profiler", "addr", *flagProfileAddr)
@@ -40,15 +44,24 @@ func main() {
 		}()
 	}
 
+	if *flagOtelTraceAddr != "" {
+		slog.Info("exporting opentelemetry traces", "addr", *flagOtelTraceAddr)
+		traceProvider, err := raftotel.InitTracer(*flagOtelTraceAddr)
+		if err != nil {
+			slog.Error("could not start tracer", "error", err.Error())
+		}
+		defer traceProvider.Shutdown(ctx)
+	}
+
 	if *flagLoadNodes != "" {
 		runLoad()
 	} else {
-		runNode()
+		runNode(ctx)
 	}
 }
 
 func runLoad() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(raftotel.NewTraceLogHandler(slog.NewTextHandler(os.Stdout, nil)))
 	nodes, err := raft.ParseNodesFlag(*flagLoadNodes)
 	if err != nil {
 		logger.Error("invalid -loadnodes usage", "value", *flagNodes, "err", err)
@@ -113,8 +126,8 @@ func loadNode(logger *slog.Logger, wg *sync.WaitGroup, id raft.NodeId, addr stri
 	wg.Done()
 }
 
-func runNode() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+func runNode(ctx context.Context) {
+	logger := slog.New(raftotel.NewTraceLogHandler(slog.NewTextHandler(os.Stdout, nil)))
 	if *flagNodeId == "" {
 		logger.Error("provide -id")
 		os.Exit(1)
@@ -135,8 +148,8 @@ func runNode() {
 	}
 
 	nodeId := raft.NodeId(*flagNodeId)
-	logger = logger.With("node", nodeId)
-	ctx, cancel := context.WithCancel(context.Background())
+	logger = logger.With("node", nodeId, "nodeId", nodeId)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	list := &storage.ListStorage{}
 
@@ -151,7 +164,7 @@ func runNode() {
 	if err != nil {
 		slog.Error("could not get hostname", "err", err)
 	}
-	logger.Info("starting cluster node", "id", nodeId, "hostname", hostname)
+	logger.InfoContext(ctx, "starting cluster node", "id", nodeId, "hostname", hostname)
 	nodeCh := make(chan struct{})
 	go func() {
 		if err := node.Run(ctx); err != nil {
@@ -170,7 +183,7 @@ func runNode() {
 	}
 	listServer := &http.Server{Addr: addr, Handler: handler}
 	listServerCh := make(chan struct{})
-	logger.Info("starting list server", "addr", addr)
+	logger.InfoContext(ctx, "starting list server", "addr", addr)
 	go func() {
 		if err := listServer.Serve(ln); err != nil {
 			logger.Error("could not start list server", "err", err)

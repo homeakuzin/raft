@@ -476,14 +476,14 @@ type wrapProtocol struct {
 	cond   *networkConditions
 }
 
-func (p wrapProtocol) RequestVote(arg raft.RequestVote) (raft.RequestVoteResult, error) {
+func (p wrapProtocol) RequestVote(ctx context.Context, arg raft.RequestVote) (raft.RequestVoteResult, error) {
 	time.Sleep(time.Duration(p.cond.latency.Load()))
-	return p.actual.RequestVote(arg)
+	return p.actual.RequestVote(ctx, arg)
 }
 
-func (p wrapProtocol) AppendEntries(arg raft.AppendEntries) (raft.AppendEntriesResult, error) {
+func (p wrapProtocol) AppendEntries(ctx context.Context, arg raft.AppendEntries) (raft.AppendEntriesResult, error) {
 	time.Sleep(time.Duration(p.cond.latency.Load()))
-	return p.actual.AppendEntries(arg)
+	return p.actual.AppendEntries(ctx, arg)
 }
 
 type transport struct {

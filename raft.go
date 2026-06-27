@@ -8,11 +8,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var heartbeatPeriod = 50 * time.Millisecond
 var electionTimeout = 150 * time.Millisecond
 var electionTimeoutDelta = 150 * time.Millisecond
+var transportTimeout = 10 * time.Second
 
 func generateElectionTimeout() time.Duration {
 	delta := time.Duration(rand.Int63n(int64(electionTimeoutDelta) * 2))
@@ -20,16 +25,19 @@ func generateElectionTimeout() time.Duration {
 }
 
 type requestVoteRpcCall struct {
+	ctx    context.Context
 	data   RequestVote
 	result chan RequestVoteResult
 }
 
 type appendEntriesRpcCall struct {
+	ctx    context.Context
 	data   AppendEntries
 	result chan AppendEntriesResult
 }
 
 type clientRequest struct {
+	ctx    context.Context
 	cmd    []byte
 	client chan int
 }
@@ -64,6 +72,10 @@ type Node struct {
 func (n *Node) Verbose() *Node {
 	n.verbose = true
 	return n
+}
+
+func (n *Node) startSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return otel.Tracer("raft").Start(ctx, name, trace.WithAttributes(attribute.String("nodeId", n.Id.String())))
 }
 
 func NewNode(id NodeId, nodes map[NodeId]string, transport Transport, storage StateStorage, logger *slog.Logger) *Node {
@@ -163,18 +175,21 @@ func (n *Node) Shutdown(ctx context.Context) {
 	if n.State() == Dead {
 		return
 	}
-	n.logger.Info("shutting down")
+	n.logger.InfoContext(ctx, "shutting down")
 	n.shutdown <- struct{}{}
 	close(n.shutdown)
 	if err := n.transport.ShutdownServer(ctx); err != nil {
-		n.logger.Error("could not shutdown HTTP server", "error", err.Error())
+		n.logger.ErrorContext(ctx, "could not shutdown HTTP server", "error", err.Error())
 	}
 }
 
 // Blocks until majority of the cluster agrees on a command
 func (n *Node) ClientCommand(ctx context.Context, command []byte) {
-	n.logger.Info("incoming client command", "bytes", len(command))
+	ctx, span := n.startSpan(ctx, "client command")
+	defer span.End()
+	n.logger.InfoContext(ctx, "incoming client command", "bytes", len(command))
 	ur := clientRequest{
+		ctx,
 		command,
 		make(chan int),
 	}
@@ -185,12 +200,14 @@ func (n *Node) ClientCommand(ctx context.Context, command []byte) {
 	}
 }
 
-func (n *Node) RequestVote(requestVote RequestVote) (RequestVoteResult, error) {
+func (n *Node) RequestVote(ctx context.Context, requestVote RequestVote) (RequestVoteResult, error) {
 	responseCh := make(chan RequestVoteResult)
 	select {
 	case <-n.runCtx.Done():
 		return RequestVoteResult{}, n.runCtx.Err()
-	case n.requestVoteRpc <- requestVoteRpcCall{requestVote, responseCh}:
+	case <-ctx.Done():
+		return RequestVoteResult{}, ctx.Err()
+	case n.requestVoteRpc <- requestVoteRpcCall{ctx, requestVote, responseCh}:
 	}
 	select {
 	case <-n.runCtx.Done():
@@ -200,12 +217,14 @@ func (n *Node) RequestVote(requestVote RequestVote) (RequestVoteResult, error) {
 	}
 }
 
-func (n *Node) AppendEntries(appendEntries AppendEntries) (AppendEntriesResult, error) {
+func (n *Node) AppendEntries(ctx context.Context, appendEntries AppendEntries) (AppendEntriesResult, error) {
 	responseCh := make(chan AppendEntriesResult)
 	select {
 	case <-n.runCtx.Done():
 		return AppendEntriesResult{}, n.runCtx.Err()
-	case n.appendEntriesRpc <- appendEntriesRpcCall{appendEntries, responseCh}:
+	case <-ctx.Done():
+		return AppendEntriesResult{}, ctx.Err()
+	case n.appendEntriesRpc <- appendEntriesRpcCall{ctx, appendEntries, responseCh}:
 	}
 	select {
 	case <-n.runCtx.Done():
@@ -217,7 +236,7 @@ func (n *Node) AppendEntries(appendEntries AppendEntries) (AppendEntriesResult, 
 
 func (n *Node) Run(ctx context.Context) error {
 	if n.State() != Dead {
-		n.logger.Info("node is already running")
+		n.logger.InfoContext(ctx, "node is already running")
 		return nil
 	}
 
@@ -239,9 +258,9 @@ func (n *Node) Run(ctx context.Context) error {
 	n.runCtx = ctx
 
 	n.mu.Unlock()
-	n.logger.Info("starting event loop")
+	n.logger.InfoContext(ctx, "starting event loop")
 	n.eventLoop(n.runCtx)
-	n.logger.Info("stopped event loop")
+	n.logger.InfoContext(ctx, "stopped event loop")
 	n.setState(Dead)
 	return nil
 }
@@ -269,24 +288,28 @@ eventLoop:
 	for {
 		select {
 		case <-n.shutdown:
-			n.logger.Info("shut down event loop")
+			n.logger.InfoContext(ctx, "shut down event loop")
 			break eventLoop
 
 		case appendEntries := <-n.appendEntriesRpc:
-			appendEntries.result <- n.appendEntriesRPC(appendEntries.data)
+			appendEntries.result <- n.appendEntriesRPC(appendEntries.ctx, appendEntries.data)
 		case requestVote := <-n.requestVoteRpc:
-			requestVote.result <- n.requestVoteRPC(requestVote.data)
+			requestVote.result <- n.requestVoteRPC(requestVote.ctx, requestVote.data)
 		case <-n.electionTimer.C:
-			n.startElection(ctx, requestVoteResponse)
+			electionCtx, span := n.startSpan(ctx, "election")
+			n.startElection(electionCtx, requestVoteResponse)
+			span.End()
 		case response := <-requestVoteResponse:
-			n.onRequestVoteResponse(response)
+			n.onRequestVoteResponse(ctx, response)
 
 		case <-n.heartbeatTimer.C:
-			n.sendHeartbeats(ctx, appendEntriesResponse)
+			heartbeatCtx, span := n.startSpan(ctx, "heartbeat")
+			n.sendHeartbeats(heartbeatCtx, appendEntriesResponse)
+			span.End()
 		case appendEntriesResult := <-appendEntriesResponse:
 			n.onAppendEntriesResponse(ctx, appendEntriesResult, appendEntriesResponse)
 		case req := <-n.clientRequestCh:
-			n.onClientCommand(ctx, req, appendEntriesResponse)
+			n.onClientCommand(req, appendEntriesResponse)
 		}
 
 		switch n.State() {
@@ -301,9 +324,10 @@ eventLoop:
 }
 
 // maybe return error to a client?
-func (n *Node) onClientCommand(ctx context.Context, req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- appendEntriesFollowerResult) {
+	ctx := req.ctx
 	if state := n.State(); state != Leader {
-		n.logger.Warn("got client request while not being leader", "state", state)
+		n.logger.WarnContext(ctx, "got client request while not being leader", "state", state)
 		req.client <- 1
 		return
 	}
@@ -311,9 +335,11 @@ func (n *Node) onClientCommand(ctx context.Context, req clientRequest, appendEnt
 	for _, id := range n.otherNodeIds {
 		go func() {
 			appendEntries := n.makeAppendEntries(id)
-			result, err := n.transport.IssueAppendEntries(ctx, appendEntries, id)
+			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
+			defer cancel()
+			result, err := n.transport.IssueAppendEntries(timeoutctx, appendEntries, id)
 			if err != nil {
-				n.logger.Error("could not issue AppendEntries", "dest", id, "error", err.Error())
+				n.logger.ErrorContext(ctx, "could not issue AppendEntries", "dest", id, "error", err.Error())
 			} else {
 				appendEntriesResponse <- appendEntriesFollowerResult{&appendEntries, result, req.client, id}
 			}
@@ -323,12 +349,12 @@ func (n *Node) onClientCommand(ctx context.Context, req clientRequest, appendEnt
 
 func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult appendEntriesFollowerResult, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
-		n.logger.Warn("got AppendEntriesRPCResult while not being leader", "state", state)
+		n.logger.WarnContext(ctx, "got AppendEntriesRPCResult while not being leader", "state", state)
 		return
 	}
 	if appendEntriesResult.result.Term > n.CurrentTerm() {
 		n.setCurrentTerm(appendEntriesResult.result.Term)
-		n.becomeFollower()
+		n.becomeFollower(ctx)
 		return
 	}
 	if appendEntriesResult.result.Success {
@@ -351,7 +377,7 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 				}
 			}
 			if newCommitIndex > savedCommitIndex {
-				n.logger.Info("update commit index", "value", newCommitIndex, "previous", savedCommitIndex)
+				n.logger.InfoContext(ctx, "update commit index", "value", newCommitIndex, "previous", savedCommitIndex)
 				n.StateMachine.SetCommitIndex(newCommitIndex)
 				n.StateMachine.Apply(newCommitIndex)
 				appendEntriesResult.client <- newCommitIndex
@@ -364,9 +390,11 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 		n.mu.Unlock()
 		go func() {
 			appendEntries := n.makeAppendEntries(appendEntriesResult.id)
-			result, err := n.transport.IssueAppendEntries(ctx, appendEntries, appendEntriesResult.id)
+			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
+			defer cancel()
+			result, err := n.transport.IssueAppendEntries(timeoutctx, appendEntries, appendEntriesResult.id)
 			if err != nil {
-				n.logger.Error("could not reissue AppendEntries", "dest", appendEntriesResult.id, "error", err.Error())
+				n.logger.ErrorContext(ctx, "could not reissue AppendEntries", "dest", appendEntriesResult.id, "error", err.Error())
 			} else {
 				select {
 				case <-ctx.Done():
@@ -379,15 +407,17 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 
 func (n *Node) sendHeartbeats(ctx context.Context, appendEntriesResponse chan<- appendEntriesFollowerResult) {
 	if state := n.State(); state != Leader {
-		n.logger.Warn("got heartbeatTimer tick while not being a leader", "state", state)
+		n.logger.WarnContext(ctx, "got heartbeatTimer tick while not being a leader", "state", state)
 		return
 	}
 	for _, id := range n.otherNodeIds {
 		go func() {
 			appendEntries := n.makeAppendEntries(id)
-			result, err := n.transport.IssueAppendEntries(ctx, n.makeAppendEntries(id), id)
+			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
+			defer cancel()
+			result, err := n.transport.IssueAppendEntries(timeoutctx, n.makeAppendEntries(id), id)
 			if err != nil {
-				n.logger.Debug("could not issue heartbeat", "dest", id, "error", err.Error())
+				n.logger.DebugContext(ctx, "could not issue heartbeat", "dest", id, "error", err.Error())
 			} else {
 				select {
 				case <-ctx.Done():
@@ -398,36 +428,38 @@ func (n *Node) sendHeartbeats(ctx context.Context, appendEntriesResponse chan<- 
 	}
 }
 
-func (n *Node) onRequestVoteResponse(response RequestVoteResult) {
+func (n *Node) onRequestVoteResponse(ctx context.Context, response RequestVoteResult) {
 	if state := n.State(); state != Candidate {
-		n.logger.Warn("got RequestVoteRPCResult while not being a Candidate", "state", state)
+		n.logger.WarnContext(ctx, "got RequestVoteRPCResult while not being a Candidate", "state", state)
 		return
 	}
 	if response.Term > n.CurrentTerm() {
 		n.setCurrentTerm(response.Term)
-		n.becomeFollower()
+		n.becomeFollower(ctx)
 		return
 	}
 	if response.VoteGranted {
 		// TODO: check vote source
 		votes := n.incrementVotesHave()
 		if votes*2 > len(n.nodes) {
-			n.becomeLeader()
+			n.becomeLeader(ctx)
 		}
 	}
 }
 
 func (n *Node) startElection(ctx context.Context, requestVoteResponse chan<- RequestVoteResult) {
-	n.becomeCandidate()
+	n.becomeCandidate(ctx)
 	for _, id := range n.otherNodeIds {
 		go func() {
-			n.logger.Debug("issuing RequestVote", "dest", id)
-			result, err := n.transport.IssueRequestVote(ctx, RequestVote{
+			n.logger.DebugContext(ctx, "issuing RequestVote", "dest", id)
+			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
+			defer cancel()
+			result, err := n.transport.IssueRequestVote(timeoutctx, RequestVote{
 				Term:        n.CurrentTerm(),
 				CandidateId: n.Id,
 			}, id)
 			if err != nil {
-				n.logger.Debug("could not issue RequestVote", "dest", id, "error", err.Error())
+				n.logger.DebugContext(ctx, "could not issue RequestVote", "dest", id, "error", err.Error())
 			} else {
 				select {
 				case <-ctx.Done():
@@ -441,14 +473,14 @@ func (n *Node) startElection(ctx context.Context, requestVoteResponse chan<- Req
 // Receiver implementation:
 // 1. Reply false if term < currentTerm (§5.1)
 // 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2,§5.4)
-func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
-	n.logger.Debug("got RequestVoteRPC call", "from", requestVote.CandidateId)
+func (n *Node) requestVoteRPC(ctx context.Context, requestVote RequestVote) RequestVoteResult {
+	n.logger.DebugContext(ctx, "got RequestVoteRPC call", "from", requestVote.CandidateId)
 	response := RequestVoteResult{}
 	lastLog, lastIndex, ok := n.StateMachine.Last()
 	candidateUpToDate := !ok || lastIndex >= requestVote.LastLogIndex && lastLog.Term >= requestVote.LastLogTerm
 	if requestVote.Term > n.CurrentTerm() || (n.getVotedFor() == EmptyId && candidateUpToDate) {
 		n.setCurrentTerm(requestVote.Term)
-		n.becomeFollower()
+		n.becomeFollower(ctx)
 		n.setVotedFor(requestVote.CandidateId)
 		response.VoteGranted = true
 	}
@@ -462,7 +494,7 @@ func (n *Node) requestVoteRPC(requestVote RequestVote) RequestVoteResult {
 // 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 // 4. Append any new entries not already in the log
 // 5. TODO If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-func (n *Node) appendEntriesRPC(appendEntries AppendEntries) AppendEntriesResult {
+func (n *Node) appendEntriesRPC(ctx context.Context, appendEntries AppendEntries) AppendEntriesResult {
 	response := AppendEntriesResult{Term: n.CurrentTerm()}
 	if appendEntries.Term < n.CurrentTerm() {
 		return response
@@ -475,24 +507,24 @@ func (n *Node) appendEntriesRPC(appendEntries AppendEntries) AppendEntriesResult
 			}
 			if lastEntry.Term != appendEntries.PrevLogTerm {
 				n.StateMachine.DeleteFrom(appendEntries.PrevLogIndex)
-				n.logger.Info("delete irrelevant logs", "fromIndex", appendEntries.PrevLogIndex)
+				n.logger.InfoContext(ctx, "delete irrelevant logs", "fromIndex", appendEntries.PrevLogIndex)
 				return response
 			}
 		} else if nlogs := n.StateMachine.Len(); nlogs > 0 {
 			n.StateMachine.DeleteFrom(0)
-			n.logger.Info("delete irrelevant logs", "fromIndex", appendEntries.PrevLogIndex)
+			n.logger.InfoContext(ctx, "delete irrelevant logs", "fromIndex", appendEntries.PrevLogIndex)
 			return response
 		}
 		logs := n.StateMachine.AppendLogs(appendEntries.Entries...)
-		n.logger.Info("replicated leader logs", "countNewEntries", len(appendEntries.Entries), "countTotalLogs", logs)
+		n.logger.InfoContext(ctx, "replicated leader logs", "countNewEntries", len(appendEntries.Entries), "countTotalLogs", logs)
 	}
 	n.setCurrentTerm(appendEntries.Term)
-	n.becomeFollower()
+	n.becomeFollower(ctx)
 	if appendEntries.LeaderCommit > n.StateMachine.CommitIndex() {
 		actualCommit := appendEntries.LeaderCommit
 		n.StateMachine.Apply(actualCommit)
 		n.StateMachine.SetCommitIndex(actualCommit)
-		n.logger.Info("Applied new commit index", "value", actualCommit)
+		n.logger.InfoContext(ctx, "Applied new commit index", "value", actualCommit)
 		n.dispatchEvent(EventCommit{actualCommit})
 	}
 	response.Success = true
@@ -523,29 +555,29 @@ func (n *Node) makeAppendEntries(peer NodeId) AppendEntries {
 	}
 }
 
-func (n *Node) becomeCandidate() {
+func (n *Node) becomeCandidate(ctx context.Context) {
 	if n.setState(Candidate) != Candidate {
-		n.logger.Info("switch state", "value", Candidate)
+		n.logger.InfoContext(ctx, "switch state", "value", Candidate)
 	}
 	term := n.incrementTerm()
 	n.setVotedFor(n.Id)
 	n.setVotesHave(1)
-	n.logger.Info("election", "term", term)
+	n.logger.InfoContext(ctx, "election", "term", term)
 	n.dispatchEvent(EventBecomeCandidate{})
 }
 
-func (n *Node) becomeFollower() {
+func (n *Node) becomeFollower(ctx context.Context) {
 	if n.setState(Follower) != Follower {
-		n.logger.Info("switch state", "value", Follower)
+		n.logger.InfoContext(ctx, "switch state", "value", Follower)
 	}
 	n.electionTimer.Reset(generateElectionTimeout())
 	n.heartbeatTimer.Stop()
 	n.dispatchEvent(EventBecomeFollower{})
 }
 
-func (n *Node) becomeLeader() {
+func (n *Node) becomeLeader(ctx context.Context) {
 	if n.setState(Leader) != Leader {
-		n.logger.Info("switch state", "value", Leader)
+		n.logger.InfoContext(ctx, "switch state", "value", Leader)
 	}
 	n.mu.Lock()
 	for _, id := range n.otherNodeIds {
