@@ -5,7 +5,7 @@ COPY go.mod go.sum .
 RUN go mod download
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o raft-log-http
+RUN CGO_ENABLED=0 go build -o raft-log-http ./cmd/list
 
 FROM scratch AS app
 COPY --from=builder /build/raft-log-http /raft-log-http

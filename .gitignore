@@ -1,6 +1,6 @@
 raft
+/list
 tmp/
 showcase/showcase
-example/list/list
 *.log
 .zed

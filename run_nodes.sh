@@ -16,10 +16,13 @@ cleanup() {
 # Set up trap
 trap cleanup SIGINT SIGTERM
 
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR" || exit 1
+
 # Build
 echo "Building..."
 EXECUTABLE=list
-go build -race -o $EXECUTABLE || { echo "Build failed!"; exit 1; }
+go build -race -o $EXECUTABLE ./cmd/list || { echo "Build failed!"; exit 1; }
 echo "Build successful!"
 
 # Start nodes
