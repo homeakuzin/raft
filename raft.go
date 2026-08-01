@@ -74,8 +74,9 @@ func (n *Node) Verbose() *Node {
 	return n
 }
 
-func (n *Node) startSpan(ctx context.Context, name string) (context.Context, trace.Span) {
-	return otel.Tracer("raft").Start(ctx, name, trace.WithAttributes(attribute.String("nodeId", n.Id.String())))
+func (n *Node) startSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	opts = append(opts, trace.WithAttributes(attribute.String("nodeId", n.Id.String())))
+	return otel.Tracer("raft").Start(ctx, name, opts...)
 }
 
 func NewNode(id NodeId, nodes map[NodeId]string, transport Transport, storage StateStorage, logger *slog.Logger) *Node {
@@ -337,7 +338,7 @@ func (n *Node) onClientCommand(req clientRequest, appendEntriesResponse chan<- a
 			appendEntries := n.makeAppendEntries(id)
 			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
 			defer cancel()
-			result, err := n.transport.IssueAppendEntries(timeoutctx, appendEntries, id)
+			result, err := n.transport.IssueAppendEntries(n, timeoutctx, appendEntries, id)
 			if err != nil {
 				n.logger.ErrorContext(ctx, "could not issue AppendEntries", "dest", id, "error", err.Error())
 			} else {
@@ -392,7 +393,7 @@ func (n *Node) onAppendEntriesResponse(ctx context.Context, appendEntriesResult 
 			appendEntries := n.makeAppendEntries(appendEntriesResult.id)
 			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
 			defer cancel()
-			result, err := n.transport.IssueAppendEntries(timeoutctx, appendEntries, appendEntriesResult.id)
+			result, err := n.transport.IssueAppendEntries(n, timeoutctx, appendEntries, appendEntriesResult.id)
 			if err != nil {
 				n.logger.ErrorContext(ctx, "could not reissue AppendEntries", "dest", appendEntriesResult.id, "error", err.Error())
 			} else {
@@ -415,7 +416,7 @@ func (n *Node) sendHeartbeats(ctx context.Context, appendEntriesResponse chan<- 
 			appendEntries := n.makeAppendEntries(id)
 			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
 			defer cancel()
-			result, err := n.transport.IssueAppendEntries(timeoutctx, n.makeAppendEntries(id), id)
+			result, err := n.transport.IssueAppendEntries(n, timeoutctx, n.makeAppendEntries(id), id)
 			if err != nil {
 				n.logger.DebugContext(ctx, "could not issue heartbeat", "dest", id, "error", err.Error())
 			} else {
@@ -454,7 +455,7 @@ func (n *Node) startElection(ctx context.Context, requestVoteResponse chan<- Req
 			n.logger.DebugContext(ctx, "issuing RequestVote", "dest", id)
 			timeoutctx, cancel := context.WithTimeout(ctx, transportTimeout)
 			defer cancel()
-			result, err := n.transport.IssueRequestVote(timeoutctx, RequestVote{
+			result, err := n.transport.IssueRequestVote(n, timeoutctx, RequestVote{
 				Term:        n.CurrentTerm(),
 				CandidateId: n.Id,
 			}, id)

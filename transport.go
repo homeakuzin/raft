@@ -18,8 +18,8 @@ import (
 )
 
 type RPCClient interface {
-	IssueRequestVote(ctx context.Context, data RequestVote, node NodeId) (RequestVoteResult, error)
-	IssueAppendEntries(ctx context.Context, data AppendEntries, node NodeId) (AppendEntriesResult, error)
+	IssueRequestVote(node *Node, ctx context.Context, data RequestVote, dest NodeId) (RequestVoteResult, error)
+	IssueAppendEntries(node *Node, ctx context.Context, data AppendEntries, dest NodeId) (AppendEntriesResult, error)
 }
 
 type RaftProtocol interface {
@@ -150,8 +150,8 @@ func (t *httpTransport) Serve(protocol RaftProtocol) error {
 	return nil
 }
 
-func (t *httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, node NodeId) (result RequestVoteResult, err error) {
-	ctx, span := otel.Tracer("raft").Start(ctx, "RequestVote", trace.WithSpanKind(trace.SpanKindClient))
+func (t *httpTransport) IssueRequestVote(node *Node, ctx context.Context, data RequestVote, dest NodeId) (result RequestVoteResult, err error) {
+	ctx, span := node.startSpan(ctx, "RequestVote", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 
 	body, err := json.Marshal(&data)
@@ -160,7 +160,7 @@ func (t *httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, 
 		return result, err
 	}
 
-	host := t.nodeAddrs[node]
+	host := t.nodeAddrs[dest]
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/request-vote", host), bytes.NewBuffer(body))
 	if err != nil {
 		raftotel.ErrSpan(span, err)
@@ -192,9 +192,9 @@ func (t *httpTransport) IssueRequestVote(ctx context.Context, data RequestVote, 
 	return
 }
 
-func (t *httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntries, node NodeId) (AppendEntriesResult, error) {
+func (t *httpTransport) IssueAppendEntries(node *Node, ctx context.Context, data AppendEntries, dest NodeId) (AppendEntriesResult, error) {
 	var result AppendEntriesResult
-	ctx, span := otel.Tracer("raft").Start(ctx, "AppendEntries", trace.WithSpanKind(trace.SpanKindClient))
+	ctx, span := node.startSpan(ctx, "AppendEntries", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 
 	body, err := json.Marshal(&data)
@@ -203,7 +203,7 @@ func (t *httpTransport) IssueAppendEntries(ctx context.Context, data AppendEntri
 		return result, err
 	}
 
-	host := t.nodeAddrs[node]
+	host := t.nodeAddrs[dest]
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/rpc/append-entries", host), bytes.NewBuffer(body))
 	if err != nil {
 		raftotel.ErrSpan(span, err)
