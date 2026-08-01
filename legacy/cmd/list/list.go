@@ -34,6 +34,7 @@ var flagOtelTraceAddr = flag.String("traceExportAddr", "", "Address to export Op
 func main() {
 	flag.Parse()
 	ctx := context.Background()
+	logger := slog.New(raftotel.NewTraceLogHandler(slog.NewTextHandler(os.Stdout, nil)))
 
 	if *flagProfileAddr != "" {
 		slog.Info("running profiler", "addr", *flagProfileAddr)
@@ -53,15 +54,17 @@ func main() {
 		defer traceProvider.Shutdown(ctx)
 	}
 
+	stopPyroscope := startPyroscope(logger, *flagNodeId)
+	defer stopPyroscope()
+
 	if *flagLoadNodes != "" {
-		runLoad()
+		runLoad(logger)
 	} else {
-		runNode(ctx)
+		runNode(ctx, logger)
 	}
 }
 
-func runLoad() {
-	logger := slog.New(raftotel.NewTraceLogHandler(slog.NewTextHandler(os.Stdout, nil)))
+func runLoad(logger *slog.Logger) {
 	nodes, err := raft.ParseNodesFlag(*flagLoadNodes)
 	if err != nil {
 		logger.Error("invalid -loadnodes usage", "value", *flagNodes, "err", err)
@@ -126,8 +129,7 @@ func loadNode(logger *slog.Logger, wg *sync.WaitGroup, id raft.NodeId, addr stri
 	wg.Done()
 }
 
-func runNode(ctx context.Context) {
-	logger := slog.New(raftotel.NewTraceLogHandler(slog.NewTextHandler(os.Stdout, nil)))
+func runNode(ctx context.Context, logger *slog.Logger) {
 	if *flagNodeId == "" {
 		logger.Error("provide -id")
 		os.Exit(1)

@@ -492,7 +492,7 @@ type transport struct {
 	cond   networkConditions
 }
 
-func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote, node raft.NodeId) (raft.RequestVoteResult, error) {
+func (t *transport) IssueRequestVote(_ *raft.Node, ctx context.Context, data raft.RequestVote, node raft.NodeId) (raft.RequestVoteResult, error) {
 	t.cond.unavailableNodeMu.Lock()
 	unavailableNodeId := t.cond.unavailableNode
 	t.cond.unavailableNodeMu.Unlock()
@@ -500,10 +500,10 @@ func (t *transport) IssueRequestVote(ctx context.Context, data raft.RequestVote,
 		return raft.RequestVoteResult{}, errors.New("node is unavailable")
 	}
 	time.Sleep(time.Duration(t.cond.latency.Load()))
-	return t.actual.IssueRequestVote(ctx, data, node)
+	return t.actual.IssueRequestVote(t.node.n, ctx, data, node)
 }
 
-func (t *transport) IssueAppendEntries(ctx context.Context, data raft.AppendEntries, node raft.NodeId) (raft.AppendEntriesResult, error) {
+func (t *transport) IssueAppendEntries(_ *raft.Node, ctx context.Context, data raft.AppendEntries, node raft.NodeId) (raft.AppendEntriesResult, error) {
 	t.cond.unavailableNodeMu.Lock()
 	unavailableNodeId := t.cond.unavailableNode
 	t.cond.unavailableNodeMu.Unlock()
@@ -511,7 +511,7 @@ func (t *transport) IssueAppendEntries(ctx context.Context, data raft.AppendEntr
 		return raft.AppendEntriesResult{}, errors.New("node is unavailable")
 	}
 	time.Sleep(time.Duration(t.cond.latency.Load()))
-	return t.actual.IssueAppendEntries(ctx, data, node)
+	return t.actual.IssueAppendEntries(t.node.n, ctx, data, node)
 }
 
 func (t *transport) Serve(protocol raft.RaftProtocol) error {
