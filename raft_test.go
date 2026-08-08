@@ -17,6 +17,11 @@ import (
 
 var flagDebugLevel = flag.Int("debug", 0, "node debug level")
 
+var testingTimeouts = NodeTimeouts{
+	Election:  15 * time.Millisecond,
+	Heartbeat: 5 * time.Millisecond,
+}
+
 var nodeLogColors = map[NodeId]string{
 	Node1: "\x1b[34m",
 	Node2: "\x1b[32m",
@@ -46,9 +51,9 @@ func TestLeaderIsElected(t *testing.T) {
 	logger1 := logger(t, Node1)
 	logger2 := logger(t, Node2)
 	logger3 := logger(t, Node3)
-	n1 := NewNode(Node1, []NodeId{Node2, Node3}, logger1, NewHttpTransport(ln1, Node1, addrs, logger1))
-	n2 := NewNode(Node2, []NodeId{Node1, Node3}, logger2, NewHttpTransport(ln2, Node2, addrs, logger2))
-	n3 := NewNode(Node3, []NodeId{Node1, Node2}, logger3, NewHttpTransport(ln3, Node3, addrs, logger3))
+	n1 := NewNode(Node1, []NodeId{Node2, Node3}, logger1, NewHttpTransport(ln1, Node1, addrs, logger1)).SetTimeouts(testingTimeouts)
+	n2 := NewNode(Node2, []NodeId{Node1, Node3}, logger2, NewHttpTransport(ln2, Node2, addrs, logger2)).SetTimeouts(testingTimeouts)
+	n3 := NewNode(Node3, []NodeId{Node1, Node2}, logger3, NewHttpTransport(ln3, Node3, addrs, logger3)).SetTimeouts(testingTimeouts)
 	ctx := t.Context()
 	nodes := []*Node{n1, n2, n3}
 	defer func() {

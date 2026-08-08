@@ -31,6 +31,16 @@ const (
 	Leader    State = "leader"
 )
 
+type NodeTimeouts struct {
+	Election  time.Duration
+	Heartbeat time.Duration
+}
+
+var DefaultNodeTimeouts = NodeTimeouts{
+	Election:  150 * time.Millisecond,
+	Heartbeat: 50 * time.Millisecond,
+}
+
 type RequestVoteArgs struct {
 	Term         int
 	CandidateId  NodeId
@@ -85,6 +95,8 @@ type Node struct {
 	runWg       sync.WaitGroup
 	rpcWg       sync.WaitGroup
 
+	timeouts NodeTimeouts
+
 	currentElectionVotes map[NodeId]bool
 	requestVoteRpcCh     chan requestVoteRpc
 	appendEntriesRpcCh   chan appendEntriesRpc
@@ -93,11 +105,27 @@ type Node struct {
 }
 
 func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport) *Node {
-	return &Node{mu: &sync.Mutex{}, id: id, logger: logger, peers: peers, transport: transport, shutdownCh: make(chan struct{})}
+	return &Node{
+		mu:         &sync.Mutex{},
+		id:         id,
+		logger:     logger,
+		peers:      peers,
+		transport:  transport,
+		shutdownCh: make(chan struct{}),
+		timeouts:   DefaultNodeTimeouts,
+	}
 }
 
 func (n *Node) Id() NodeId {
 	return n.id
+}
+
+func (n *Node) SetTimeouts(timeouts NodeTimeouts) *Node {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.timeouts = timeouts
+	return n
 }
 
 func (n *Node) State() State {
@@ -153,12 +181,12 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	delta := time.Duration(rand.Int63n(int64(150*time.Millisecond) * 2))
-	electionTimeout := 150*time.Millisecond + delta
+	electionTimeout := n.timeouts.Election
+	electionTimeout += time.Duration(rand.Int63n(int64(n.timeouts.Election)) * 2)
 	election := time.NewTimer(electionTimeout)
 	defer election.Stop()
 
-	heartbeat := time.NewTimer(50 * time.Millisecond)
+	heartbeat := time.NewTimer(n.timeouts.Heartbeat)
 	defer heartbeat.Stop()
 	if n.state != Leader {
 		heartbeat.Stop()
@@ -322,20 +350,83 @@ func (l *RaftLogger) dlog3(msg string, args ...any) {
 }
 
 type MemoryTransport struct {
-	node  *Node
-	peers map[NodeId]MemoryTransport
+	mu                    sync.RWMutex
+	nodeId                NodeId
+	peers                 map[NodeId]*MemoryTransport
+	requestVoteCallback   func(args RequestVoteArgs, replyCh chan<- RequestVoteReply)
+	appendEntriesCallback func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply)
+	shutdownCh            chan struct{}
+	shutdown              bool
 }
 
-func (t MemoryTransport) Serve(ctx context.Context, requestVoteCallback func(args RequestVoteArgs, replyCh chan<- RequestVoteReply) RequestVoteReply, appendEntriesCallback func(AppendEntriesArgs) AppendEntriesReply) {
-
+func NewMemoryTransport(nodeId NodeId, peers map[NodeId]*MemoryTransport) *MemoryTransport {
+	return &MemoryTransport{
+		nodeId:     nodeId,
+		peers:      peers,
+		shutdownCh: make(chan struct{}),
+	}
 }
 
-// func (t MemoryTransport) RequestVote(ctx context.Context, peer NodeId, data RequestVoteArgs) (RequestVoteReply, error) {
+func (t *MemoryTransport) Serve(ctx context.Context, requestVoteCallback func(args RequestVoteArgs, replyCh chan<- RequestVoteReply), appendEntriesCallback func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply)) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-// }
+	t.requestVoteCallback = requestVoteCallback
+	t.appendEntriesCallback = appendEntriesCallback
+	return nil
+}
 
-// func (t MemoryTransport) AppendEntries(ctx context.Context, peer NodeId, data AppendEntriesArgs) (AppendEntriesReply, error) {
-// }
+func (t *MemoryTransport) Shutdown(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !t.shutdown {
+		close(t.shutdownCh)
+		t.shutdown = true
+	}
+}
+
+func (t *MemoryTransport) RequestVote(ctx context.Context, peer NodeId, data RequestVoteArgs) (RequestVoteReply, error) {
+	peerTransport := t.peers[peer]
+
+	peerTransport.mu.RLock()
+	requestVoteCallback := peerTransport.requestVoteCallback
+	peerTransport.mu.RUnlock()
+
+	replyCh := make(chan RequestVoteReply, 1)
+	requestVoteCallback(data, replyCh)
+	select {
+	case <-ctx.Done():
+		return RequestVoteReply{}, ctx.Err()
+	case <-t.shutdownCh:
+		return RequestVoteReply{}, fmt.Errorf("memory transport %d is shut down", t.nodeId)
+	case <-peerTransport.shutdownCh:
+		return RequestVoteReply{}, fmt.Errorf("memory transport peer %d is shut down", peer)
+	case reply := <-replyCh:
+		return reply, nil
+	}
+}
+
+func (t *MemoryTransport) AppendEntries(ctx context.Context, peer NodeId, data AppendEntriesArgs) (AppendEntriesReply, error) {
+	peerTransport := t.peers[peer]
+
+	peerTransport.mu.RLock()
+	appendEntriesCallback := peerTransport.appendEntriesCallback
+	peerTransport.mu.RUnlock()
+
+	replyCh := make(chan AppendEntriesReply, 1)
+	appendEntriesCallback(data, replyCh)
+	select {
+	case <-ctx.Done():
+		return AppendEntriesReply{}, ctx.Err()
+	case <-t.shutdownCh:
+		return AppendEntriesReply{}, fmt.Errorf("memory transport %d is shut down", t.nodeId)
+	case <-peerTransport.shutdownCh:
+		return AppendEntriesReply{}, fmt.Errorf("memory transport peer %d is shut down", peer)
+	case reply := <-replyCh:
+		return reply, nil
+	}
+}
 
 type HttpPeerTransport struct {
 	ln     net.Listener
