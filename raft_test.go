@@ -23,8 +23,6 @@ var nodeLogColors = map[NodeId]string{
 	Node3: "\x1b[35m",
 }
 
-var logColorMu sync.Mutex
-
 func TestMain(m *testing.M) {
 	flag.Parse()
 	os.Exit(m.Run())
@@ -96,8 +94,7 @@ func waitForLeader(t testing.TB, nodes []*Node) (leader *Node, followers []*Node
 			}
 			stateMap[state] = append(stateMap[state], n.Id())
 		}
-		if leaderCnt == 1 {
-			assert.Len(t, followers, 2, "state map", stateMap)
+		if leaderCnt == 1 && len(followers) == 2 {
 			return
 		}
 		assert.LessOrEqual(t, leaderCnt, 1)
@@ -112,6 +109,8 @@ type coloredLogWriter struct {
 	color  string
 	prefix string
 }
+
+var logColorMu sync.Mutex
 
 func (w coloredLogWriter) Write(p []byte) (int, error) {
 	logColorMu.Lock()

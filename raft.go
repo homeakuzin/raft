@@ -217,12 +217,10 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		n.logger.dlog2("handle RequestVote call", "peer", requestVote.args.CandidateId, "args", requestVote.args)
 		var reply RequestVoteReply
 		reply.VoteGranted = false
-		if requestVote.args.Term > n.currentTerm {
+		if requestVote.args.Term > n.currentTerm || requestVote.args.Term == n.currentTerm && (n.votedFor == -1 || n.votedFor == requestVote.args.CandidateId) {
 			n.becomeFollower(requestVote.args.Term)
-			if n.votedFor == -1 {
-				n.votedFor = requestVote.args.CandidateId
-				reply.VoteGranted = true
-			}
+			n.votedFor = requestVote.args.CandidateId
+			reply.VoteGranted = true
 		}
 		reply.Peer = n.id
 		reply.Term = n.currentTerm
