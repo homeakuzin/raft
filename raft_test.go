@@ -1,21 +1,25 @@
 package main_test
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	. "github.com/homeakuzin/raft"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var flagDebugLevel = flag.Int("debug", 0, "node debug level")
+var flagPprofAddr = flag.String("pprof", "", "serve pprof on the given address, e.g. localhost:6060")
 
 var testingTimeouts = NodeTimeouts{
 	Election:  15 * time.Millisecond,
@@ -30,6 +34,18 @@ var nodeLogColors = map[NodeId]string{
 
 func TestMain(m *testing.M) {
 	flag.Parse()
+	if *flagPprofAddr != "" {
+		ln, err := net.Listen("tcp", *flagPprofAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to listen for pprof on %s: %v\n", *flagPprofAddr, err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := http.Serve(ln, nil); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(os.Stderr, "pprof server failed: %v\n", err)
+			}
+		}()
+	}
 	os.Exit(m.Run())
 }
 
@@ -37,11 +53,11 @@ func TestLeaderIsElected(t *testing.T) {
 	t.Parallel()
 
 	ln1, err := net.Listen("tcp", "0.0.0.0:0")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	ln2, err := net.Listen("tcp", "0.0.0.0:0")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	ln3, err := net.Listen("tcp", "0.0.0.0:0")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	addrs := map[NodeId]string{
 		Node1: ln1.Addr().String(),
@@ -64,49 +80,283 @@ func TestLeaderIsElected(t *testing.T) {
 	go n1.Run(ctx)
 	go n2.Run(ctx)
 	go n3.Run(ctx)
-	leader, followers := waitForLeader(t, nodes)
-	for _, n := range followers {
-		assert.Equal(t, leader.CurrentTerm(), n.CurrentTerm())
+	snapshot := waitLeaderAmong(t, nodes)
+	for _, followerID := range snapshot.followerIDs {
+		require.Equal(t, snapshot.leaderTerm, snapshot.terms[followerID])
 	}
 }
 
-func waitForLeader(t testing.TB, nodes []*Node) (leader *Node, followers []*Node) {
+func TestPartitionHealConvergesToSingleLeader(t *testing.T) {
+	t.Parallel()
+
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+
+	initial := cluster.waitHealthy()
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[0])
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[1])
+
+	majority := waitLeaderAmong(t, cluster.nodesByID(initial.followerIDs...))
+	require.Greater(t, majority.leaderTerm, initial.leaderTerm)
+
+	cluster.conditions.Heal(initial.leaderID, initial.followerIDs[0])
+	cluster.conditions.Heal(initial.leaderID, initial.followerIDs[1])
+
+	healed := cluster.waitHealthy()
+
+	require.Greater(t, healed.leaderTerm, initial.leaderTerm)
+	require.GreaterOrEqual(t, healed.leaderTerm, majority.leaderTerm)
+	for _, term := range healed.terms {
+		require.Equal(t, healed.leaderTerm, term)
+	}
+}
+
+func TestFollowerPartitionDoesNotBreakMajorityLeader(t *testing.T) {
+	t.Parallel()
+
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+
+	initial := cluster.waitHealthy()
+	partitionedFollower := initial.followerIDs[0]
+	majorityFollower := initial.followerIDs[1]
+
+	cluster.conditions.Cut(partitionedFollower, initial.leaderID)
+	cluster.conditions.Cut(partitionedFollower, majorityFollower)
+
+	stable := waitLeaderAmong(t, cluster.nodesByID(initial.leaderID, majorityFollower))
+
+	require.Equal(t, initial.leaderID, stable.leaderID)
+	require.Equal(t, initial.leaderTerm, stable.leaderTerm)
+	require.Len(t, stable.followerIDs, 1)
+	require.Equal(t, initial.leaderTerm, stable.terms[stable.followerIDs[0]])
+
+	cluster.conditions.Heal(partitionedFollower, initial.leaderID)
+	cluster.conditions.Heal(partitionedFollower, majorityFollower)
+
+	cluster.waitHealthy()
+}
+
+func TestHighLatencyFollowerRecovers(t *testing.T) {
+	t.Parallel()
+
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+
+	initial := cluster.waitHealthy()
+	slowFollower := initial.followerIDs[0]
+	majorityFollower := initial.followerIDs[1]
+
+	cluster.conditions.Latency(slowFollower, initial.leaderID, 80*time.Millisecond)
+	cluster.conditions.Latency(slowFollower, majorityFollower, 80*time.Millisecond)
+
+	waitLeaderAmong(t, cluster.nodesByID(initial.leaderID, majorityFollower))
+
+	cluster.conditions.ClearLatency(slowFollower, initial.leaderID)
+	cluster.conditions.ClearLatency(slowFollower, majorityFollower)
+
+	recovered := cluster.waitHealthy()
+	require.GreaterOrEqual(t, recovered.leaderTerm, initial.leaderTerm)
+}
+
+func TestLeaderPartitionElectsNewLeaderInMajority(t *testing.T) {
+	t.Parallel()
+
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+
+	initial := cluster.waitHealthy()
+
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[0])
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[1])
+
+	elected := waitLeaderAmong(t, cluster.nodesByID(initial.followerIDs...))
+
+	require.NotEqual(t, initial.leaderID, elected.leaderID)
+	require.Len(t, elected.followerIDs, 1)
+	require.Greater(t, elected.leaderTerm, initial.leaderTerm)
+}
+
+type clusterSnapshot struct {
+	leaderID    NodeId
+	leaderTerm  int
+	followerIDs []NodeId
+	states      map[NodeId]State
+	terms       map[NodeId]int
+}
+
+func waitLeaderAmong(t testing.TB, nodes []*Node) clusterSnapshot {
 	maxRetries := 50
 	retries := 0
 	pollInterval := time.Millisecond * 15
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	stateMap := map[State][]NodeId{}
 	for range ticker.C {
 		retries++
 		if retries == maxRetries {
 			break
 		}
-		t.Log("poll states")
-		stateMap := map[State][]NodeId{
-			Leader:    make([]NodeId, 0, len(nodes)),
-			Candidate: make([]NodeId, 0, len(nodes)),
-			Follower:  make([]NodeId, 0, len(nodes)),
+		snapshot := snapshotNodes(nodes)
+		stateMap = statesByState(snapshot.states)
+		if snapshot.leaderID != None && len(snapshot.followerIDs) == len(nodes)-1 {
+			return snapshot
 		}
-		followers = make([]*Node, 0, len(nodes))
-		leaderCnt := 0
-		for _, n := range nodes {
-			state := n.State()
-			if state == Leader {
-				leaderCnt++
-				leader = n
-			} else if state == Follower {
-				followers = append(followers, n)
-			}
-			stateMap[state] = append(stateMap[state], n.Id())
-		}
-		if leaderCnt == 1 && len(followers) == 2 {
-			return
-		}
-		assert.LessOrEqual(t, leaderCnt, 1)
 		time.Sleep(pollInterval)
 	}
-	t.Fatal("no leader elected")
-	return
+	t.Fatalf("no leader elected: %+v", stateMap)
+	return clusterSnapshot{}
+}
+
+type networkTestCluster struct {
+	t          testing.TB
+	nodes      []*Node
+	conditions *networkConditions
+}
+
+func newHTTPNetworkTestCluster(t testing.TB) *networkTestCluster {
+	t.Helper()
+
+	listeners := map[NodeId]net.Listener{}
+	addrs := map[NodeId]string{}
+	for _, id := range []NodeId{Node1, Node2, Node3} {
+		ln, err := net.Listen("tcp", "0.0.0.0:0")
+		require.NoError(t, err)
+
+		listeners[id] = ln
+		addrs[id] = ln.Addr().String()
+	}
+
+	conditions := newNetworkConditions(t)
+	nodes := make([]*Node, 0, len(listeners))
+	for _, id := range []NodeId{Node1, Node2, Node3} {
+		nodeLogger := logger(t, id)
+		base := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
+		node := NewNode(id, peersFor(id), nodeLogger, withNetworkConditions(id, base, conditions)).
+			SetTimeouts(testingTimeouts)
+		nodes = append(nodes, node)
+	}
+
+	cluster := &networkTestCluster{t: t, nodes: nodes, conditions: conditions}
+	t.Cleanup(func() {
+		cluster.Shutdown(t.Context())
+	})
+	return cluster
+}
+
+func (c *networkTestCluster) Run(ctx context.Context) {
+	for _, n := range c.nodes {
+		go n.Run(ctx)
+	}
+}
+
+func (c *networkTestCluster) Shutdown(ctx context.Context) {
+	for _, n := range c.nodes {
+		n.Shutdown(ctx)
+	}
+}
+
+func (c *networkTestCluster) nodesByID(ids ...NodeId) []*Node {
+	nodes := make([]*Node, 0, len(ids))
+	for _, id := range ids {
+		for _, n := range c.nodes {
+			if n.Id() == id {
+				nodes = append(nodes, n)
+				break
+			}
+		}
+	}
+	return nodes
+}
+
+func (c *networkTestCluster) waitHealthy() clusterSnapshot {
+	c.t.Helper()
+
+	maxRetries := 50
+	retries := 0
+	pollInterval := time.Millisecond * 15
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	stateMap := map[State][]NodeId{}
+
+	for range ticker.C {
+		retries++
+		if retries == maxRetries {
+			break
+		}
+		snapshot := snapshotNodes(c.nodes)
+		stateMap = statesByState(snapshot.states)
+		if snapshot.leaderID != None && len(snapshot.followerIDs) == len(c.nodes)-1 && allTermsEqual(snapshot) {
+			c.t.Logf("cluster is healthy: %+v", stateMap)
+			return snapshot
+		}
+		time.Sleep(pollInterval)
+	}
+	c.t.Fatalf("cluster is not healthy: %+v", stateMap)
+	return clusterSnapshot{}
+}
+
+func peersFor(id NodeId) []NodeId {
+	switch id {
+	case Node1:
+		return []NodeId{Node2, Node3}
+	case Node2:
+		return []NodeId{Node1, Node3}
+	case Node3:
+		return []NodeId{Node1, Node2}
+	default:
+		panic(fmt.Sprintf("unknown node id %d", id))
+	}
+}
+
+func snapshotNodes(nodes []*Node) clusterSnapshot {
+	snapshot := clusterSnapshot{
+		followerIDs: make([]NodeId, 0, len(nodes)-1),
+		states:      make(map[NodeId]State, len(nodes)),
+		terms:       make(map[NodeId]int, len(nodes)),
+	}
+	leaderCnt := 0
+	for _, n := range nodes {
+		id := n.Id()
+		state := n.State()
+		term := n.CurrentTerm()
+		snapshot.states[id] = state
+		snapshot.terms[id] = term
+		switch state {
+		case Leader:
+			leaderCnt++
+			snapshot.leaderID = id
+			snapshot.leaderTerm = term
+		case Follower:
+			snapshot.followerIDs = append(snapshot.followerIDs, id)
+		}
+	}
+	if leaderCnt != 1 {
+		snapshot.leaderID = None
+		snapshot.leaderTerm = 0
+	}
+	return snapshot
+}
+
+func allTermsEqual(snapshot clusterSnapshot) bool {
+	for _, term := range snapshot.terms {
+		if term != snapshot.leaderTerm {
+			return false
+		}
+	}
+	return true
+}
+
+func statesByState(states map[NodeId]State) map[State][]NodeId {
+	stateMap := map[State][]NodeId{
+		Leader:    make([]NodeId, 0, len(states)),
+		Candidate: make([]NodeId, 0, len(states)),
+		Follower:  make([]NodeId, 0, len(states)),
+	}
+	for id, state := range states {
+		stateMap[state] = append(stateMap[state], id)
+	}
+	return stateMap
 }
 
 type coloredLogWriter struct {

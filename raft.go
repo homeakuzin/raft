@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -83,17 +84,19 @@ type Transport interface {
 }
 
 type Node struct {
-	mu          *sync.Mutex
-	id          NodeId
-	votedFor    NodeId
-	currentTerm int
-	state       State
-	transport   Transport
-	logger      *RaftLogger
-	peers       []NodeId
-	shutdownCh  chan struct{}
-	runWg       sync.WaitGroup
-	rpcWg       sync.WaitGroup
+	mu             *sync.Mutex
+	id             NodeId
+	votedFor       NodeId
+	currentTerm    int
+	state          State
+	transport      Transport
+	logger         *RaftLogger
+	peers          []NodeId
+	shutdownCh     chan struct{}
+	runWg          sync.WaitGroup
+	rpcWg          sync.WaitGroup
+	heartbeatTimer *time.Timer
+	electionTimer  *time.Timer
 
 	timeouts NodeTimeouts
 
@@ -151,14 +154,14 @@ func (n *Node) Run(ctx context.Context) error {
 	n.runWg.Add(1)
 	defer n.runWg.Done()
 
-	n.state = Follower
 	n.logger.InfoContext(ctx, "start node")
+
 	n.requestVoteRpcCh = make(chan requestVoteRpc, len(n.peers))
 	n.requestVoteReplyCh = make(chan RequestVoteReply, len(n.peers))
 	n.appendEntriesRpcCh = make(chan appendEntriesRpc, len(n.peers))
 	n.appendEntriesReplyCh = make(chan AppendEntriesReply, len(n.peers))
 	n.currentElectionVotes = make(map[NodeId]bool, len(n.peers))
-	n.votedFor = -1
+
 	if err := n.transport.Serve(ctx, func(args RequestVoteArgs, replyCh chan<- RequestVoteReply) {
 		n.logger.dlog2("received RequestVote", "args", args)
 		n.requestVoteRpcCh <- requestVoteRpc{args, replyCh}
@@ -170,6 +173,16 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("could not serve raft transport: %w", err)
 	}
 	defer n.transport.Shutdown(ctx)
+
+	n.votedFor = -1
+	n.state = Follower
+	n.heartbeatTimer = time.NewTimer(0)
+	n.heartbeatTimer.Stop()
+	defer n.heartbeatTimer.Stop()
+	n.electionTimer = time.NewTimer(0)
+	defer n.electionTimer.Stop()
+	n.resetElectionTimer()
+
 	for {
 		if n.eventLoop(ctx) {
 			return nil
@@ -178,19 +191,9 @@ func (n *Node) Run(ctx context.Context) error {
 }
 
 func (n *Node) eventLoop(ctx context.Context) (stop bool) {
+	n.logger.dlog3("wait next event")
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	electionTimeout := n.timeouts.Election
-	electionTimeout += time.Duration(rand.Int63n(int64(n.timeouts.Election)) * 2)
-	election := time.NewTimer(electionTimeout)
-	defer election.Stop()
-
-	heartbeat := time.NewTimer(n.timeouts.Heartbeat)
-	defer heartbeat.Stop()
-	if n.state != Leader {
-		heartbeat.Stop()
-	}
 
 	select {
 	case <-ctx.Done():
@@ -198,9 +201,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 	case <-n.shutdownCh:
 		stop = true
 
-	case <-heartbeat.C:
-		n.logger.dlog("heartbeat timeout")
-		n.sendHeartbeats(ctx, n.appendEntriesReplyCh)
+	case <-n.heartbeatTimer.C:
+		n.sendHeartbeats(ctx)
+		n.resetHeartbeatTimer()
 	case reply := <-n.appendEntriesReplyCh:
 		n.logger.dlog2("handle AppendEntries reply", "peer", reply.Peer, "reply", reply)
 		if reply.Term > n.currentTerm {
@@ -218,9 +221,11 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		}
 		appendEntries.replyCh <- reply
 
-	case <-election.C:
-		n.logger.dlog("start election", "new_term", n.currentTerm+1, "timeout", electionTimeout)
+	case <-n.electionTimer.C:
+		n.logger.dlog("start election", "new_term", n.currentTerm+1)
 		n.startElection(ctx, n.requestVoteReplyCh)
+		n.resetElectionTimer()
+		n.heartbeatTimer.Stop()
 	case reply := <-n.requestVoteReplyCh:
 		n.logger.dlog2("handle RequestVote reply", "peer", reply.Peer, "reply", reply)
 		if reply.Term > n.currentTerm {
@@ -238,7 +243,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			if votes*2 > len(n.peers)+1 {
 				n.logger.dlog("become leader")
 				n.state = Leader
-				n.sendHeartbeats(ctx, n.appendEntriesReplyCh)
+				n.sendHeartbeats(ctx)
+				n.resetHeartbeatTimer()
+				n.electionTimer.Stop()
 			}
 		}
 	case requestVote := <-n.requestVoteRpcCh:
@@ -257,13 +264,25 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 	return
 }
 
-func (n *Node) becomeFollower(term int) {
-	n.logger.dlog("become follower", "term", term)
-	n.state = Follower
-	n.currentTerm = term
+func (n *Node) resetElectionTimer() {
+	n.electionTimer.Reset(n.timeouts.Election + time.Duration(rand.Int63n(int64(n.timeouts.Election))*2))
 }
 
-func (n *Node) sendHeartbeats(ctx context.Context, replyCh chan<- AppendEntriesReply) {
+func (n *Node) resetHeartbeatTimer() {
+	n.heartbeatTimer.Reset(n.timeouts.Heartbeat)
+}
+
+func (n *Node) becomeFollower(term int) {
+	if n.state != Follower {
+		n.logger.dlog("become follower", "term", term)
+	}
+	n.state = Follower
+	n.currentTerm = term
+	n.heartbeatTimer.Stop()
+	n.resetElectionTimer()
+}
+
+func (n *Node) sendHeartbeats(ctx context.Context) {
 	n.logger.dlog("send heartbeats")
 	args := AppendEntriesArgs{
 		Term:     n.currentTerm,
@@ -276,11 +295,13 @@ func (n *Node) sendHeartbeats(ctx context.Context, replyCh chan<- AppendEntriesR
 			n.logger.dlog3("send AppendEntries", "peer", peer, "args", args)
 			reply, err := n.transport.AppendEntries(ctx, peer, args)
 			if err != nil {
-				n.logger.dlog("AppendEntries failed", "peer", peer, "error", err)
+				if !errors.Is(err, context.Canceled) {
+					n.logger.dlog("AppendEntries failed", "peer", peer, "error", err)
+				}
 				return
 			}
 			reply.Peer = peer
-			replyCh <- reply
+			n.appendEntriesReplyCh <- reply
 		}()
 	}
 }
@@ -302,7 +323,9 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 			n.logger.dlog3("send RequestVote", "peer", peer, "args", args)
 			reply, err := n.transport.RequestVote(ctx, peer, args)
 			if err != nil {
-				n.logger.dlog("RequestVote failed", "peer", peer, "error", err)
+				if !errors.Is(err, context.Canceled) {
+					n.logger.dlog("RequestVote failed", "peer", peer, "error", err)
+				}
 				return
 			}
 			reply.Peer = peer
