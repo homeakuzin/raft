@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,14 +57,21 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId NodeId
+	Term         int
+	LeaderId     NodeId
+	PrevLogIndex int
+	PrevLogTerm  int
+	LeaderCommit int
+	Entries      []Log
 }
 
 type AppendEntriesReply struct {
-	Peer    NodeId
-	Term    int
-	Success bool
+	Peer          NodeId
+	Term          int
+	Success       bool
+	entriesBounds struct {
+		from, to int
+	}
 }
 
 type requestVoteRpc struct {
@@ -83,18 +91,89 @@ type Transport interface {
 	AppendEntries(ctx context.Context, id NodeId, data AppendEntriesArgs) (AppendEntriesReply, error)
 }
 
+type Log struct {
+	Term  int
+	Index int
+	Data  []byte
+}
+
+type clientCommand struct {
+	data       []byte
+	replicated chan error
+}
+
+// Index starts with 1
+type logStorage struct {
+	items []Log
+}
+
+func (s *logStorage) len() int {
+	return len(s.items)
+}
+
+func (s *logStorage) slice(from, to int) []Log {
+	if from < 1 {
+		panic("logStorage index starts with 1")
+	}
+	return s.items[from-1 : to-1]
+}
+
+func (s *logStorage) at(i int) Log {
+	if i < 1 {
+		panic("logStorage index starts with 1")
+	}
+	return s.items[i-1]
+}
+
+func (s *logStorage) clearFrom(i int) {
+	if i < 1 {
+		panic("logStorage index starts with 1")
+	}
+	s.items = s.items[:i]
+}
+
+func (s *logStorage) append(log ...Log) {
+	s.items = append(s.items, log...)
+}
+
+type StateMachine struct {
+	mu   sync.Mutex
+	logs []Log
+}
+
+func (sm *StateMachine) Logs() []Log {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	logs := make([]Log, len(sm.logs))
+	copy(logs, sm.logs)
+	return logs
+}
+
+func (sm *StateMachine) apply(logs ...Log) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.logs = append(sm.logs, logs...)
+}
+
 type Node struct {
-	mu             *sync.Mutex
-	id             NodeId
-	votedFor       NodeId
-	currentTerm    int
-	state          State
+	mu           *sync.Mutex
+	id           NodeId
+	votedFor     NodeId
+	currentTerm  int
+	state        State
+	log          *logStorage
+	stateMachine *StateMachine
+
+	commitIndex     int
+	lastApplied     int
+	nextIndex       map[NodeId]int
+	clientCommandCh chan clientCommand
+
+	peers          []NodeId
 	transport      Transport
 	logger         *RaftLogger
-	peers          []NodeId
 	shutdownCh     chan struct{}
 	runWg          sync.WaitGroup
-	rpcWg          sync.WaitGroup
 	heartbeatTimer *time.Timer
 	electionTimer  *time.Timer
 
@@ -109,13 +188,30 @@ type Node struct {
 
 func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport) *Node {
 	return &Node{
-		mu:         &sync.Mutex{},
-		id:         id,
-		logger:     logger,
-		peers:      peers,
-		transport:  transport,
-		shutdownCh: make(chan struct{}),
-		timeouts:   DefaultNodeTimeouts,
+		mu:           &sync.Mutex{},
+		id:           id,
+		logger:       logger,
+		peers:        peers,
+		transport:    transport,
+		shutdownCh:   make(chan struct{}),
+		timeouts:     DefaultNodeTimeouts,
+		log:          &logStorage{},
+		stateMachine: &StateMachine{},
+	}
+}
+
+func (n *Node) ClientCommand(ctx context.Context, command []byte) error {
+	c := clientCommand{command, make(chan error)}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case n.clientCommandCh <- c:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-c.replicated:
+		return err
 	}
 }
 
@@ -131,6 +227,10 @@ func (n *Node) SetTimeouts(timeouts NodeTimeouts) *Node {
 	return n
 }
 
+func (n *Node) StateMachine() *StateMachine {
+	return n.stateMachine
+}
+
 func (n *Node) State() State {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -143,10 +243,15 @@ func (n *Node) CurrentTerm() int {
 	return n.currentTerm
 }
 
+func (n *Node) CommitIndex() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
+}
+
 func (n *Node) Shutdown(ctx context.Context) {
 	close(n.shutdownCh)
 	n.transport.Shutdown(ctx)
-	n.rpcWg.Wait()
 	n.runWg.Wait()
 }
 
@@ -161,6 +266,11 @@ func (n *Node) Run(ctx context.Context) error {
 	n.appendEntriesRpcCh = make(chan appendEntriesRpc, len(n.peers))
 	n.appendEntriesReplyCh = make(chan AppendEntriesReply, len(n.peers))
 	n.currentElectionVotes = make(map[NodeId]bool, len(n.peers))
+	n.clientCommandCh = make(chan clientCommand)
+	n.nextIndex = make(map[NodeId]int)
+	for _, id := range n.peers {
+		n.nextIndex[id] = 1
+	}
 
 	if err := n.transport.Serve(ctx, func(args RequestVoteArgs, replyCh chan<- RequestVoteReply) {
 		n.logger.dlog2("received RequestVote", "args", args)
@@ -202,13 +312,47 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		stop = true
 
 	case <-n.heartbeatTimer.C:
-		n.sendHeartbeats(ctx)
+		n.sendAppendEntries(ctx)
 		n.resetHeartbeatTimer()
 	case reply := <-n.appendEntriesReplyCh:
 		n.logger.dlog2("handle AppendEntries reply", "peer", reply.Peer, "reply", reply)
 		if reply.Term > n.currentTerm {
 			n.becomeFollower(reply.Term)
+			return
 		}
+		if reply.Success {
+			if reply.entriesBounds.to > 0 && reply.entriesBounds.to >= reply.entriesBounds.from {
+				n.nextIndex[reply.Peer] = reply.entriesBounds.to + 1
+
+				matched := make([]int, 0, len(n.nextIndex))
+				for _, idx := range n.nextIndex {
+					matched = append(matched, idx-1)
+				}
+				slices.Sort(matched)
+				quorumMatchIndex := matched[(len(matched)-1)/2]
+
+				if quorumMatchIndex > n.commitIndex {
+					newLogs := n.log.slice(n.commitIndex+1, quorumMatchIndex+1)
+					n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", quorumMatchIndex, "new_logs_count", len(newLogs))
+					n.stateMachine.apply(newLogs...)
+					n.commitIndex = quorumMatchIndex
+				}
+			}
+		}
+	case clientCommand := <-n.clientCommandCh:
+		n.logger.dlog2("handle client command")
+		if n.state != Leader {
+			clientCommand.replicated <- errors.New("not a leader")
+			return
+		}
+		n.log.append(Log{
+			Term:  n.currentTerm,
+			Index: n.log.len(),
+			Data:  clientCommand.data,
+		})
+		n.sendAppendEntries(ctx)
+		n.resetHeartbeatTimer()
+
 	case appendEntries := <-n.appendEntriesRpcCh:
 		n.logger.dlog2("handle AppendEntries call", "peer", appendEntries.args.LeaderId, "args", appendEntries.args)
 		var reply AppendEntriesReply
@@ -218,6 +362,28 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		if appendEntries.args.Term >= n.currentTerm {
 			reply.Success = true
 			n.becomeFollower(appendEntries.args.Term)
+
+			if appendEntries.args.PrevLogIndex > 0 {
+				if n.log.len() >= appendEntries.args.PrevLogIndex {
+					logAtPrevLogIndex := n.log.at(appendEntries.args.PrevLogIndex)
+					if logAtPrevLogIndex.Term != appendEntries.args.PrevLogTerm {
+						reply.Success = false
+						n.log.clearFrom(appendEntries.args.PrevLogIndex)
+					}
+				}
+			}
+
+			if reply.Success {
+				// TODO maybe some of args.Entries are already in the log
+				n.log.append(appendEntries.args.Entries...)
+
+				if appendEntries.args.LeaderCommit > n.commitIndex {
+					newLogs := n.log.slice(n.commitIndex+1, appendEntries.args.LeaderCommit+1)
+					n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", appendEntries.args.LeaderCommit, "new_logs_count", len(newLogs))
+					n.stateMachine.apply(newLogs...)
+					n.commitIndex = appendEntries.args.LeaderCommit
+				}
+			}
 		}
 		appendEntries.replyCh <- reply
 
@@ -243,7 +409,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			if votes*2 > len(n.peers)+1 {
 				n.logger.dlog("become leader")
 				n.state = Leader
-				n.sendHeartbeats(ctx)
+				n.sendAppendEntries(ctx)
 				n.resetHeartbeatTimer()
 				n.electionTimer.Stop()
 			}
@@ -282,25 +448,36 @@ func (n *Node) becomeFollower(term int) {
 	n.resetElectionTimer()
 }
 
-func (n *Node) sendHeartbeats(ctx context.Context) {
-	n.logger.dlog("send heartbeats")
-	args := AppendEntriesArgs{
-		Term:     n.currentTerm,
-		LeaderId: n.id,
-	}
+func (n *Node) sendAppendEntries(ctx context.Context) {
+	n.logger.dlog("send AppendEntries")
 	for _, peer := range n.peers {
-		n.rpcWg.Add(1)
+		args := AppendEntriesArgs{
+			Term:         n.currentTerm,
+			LeaderId:     n.id,
+			LeaderCommit: n.commitIndex,
+		}
+		args.PrevLogIndex = n.nextIndex[peer] - 1
+		if args.PrevLogIndex > 0 {
+			args.PrevLogTerm = n.log.at(args.PrevLogIndex).Term
+		}
+		lastLogIndex := n.log.len()
+		var entriesIndexFrom, entriesIndexTo int
+		if lastLogIndex >= n.nextIndex[peer] {
+			entriesIndexFrom = n.nextIndex[peer]
+			entriesIndexTo = n.log.len()
+			entries := n.log.slice(entriesIndexFrom, entriesIndexTo+1)
+			args.Entries = make([]Log, len(entries))
+			copy(args.Entries, entries)
+		}
 		go func() {
-			defer n.rpcWg.Done()
 			n.logger.dlog3("send AppendEntries", "peer", peer, "args", args)
 			reply, err := n.transport.AppendEntries(ctx, peer, args)
 			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					n.logger.dlog("AppendEntries failed", "peer", peer, "error", err)
-				}
 				return
 			}
 			reply.Peer = peer
+			reply.entriesBounds.from = entriesIndexFrom
+			reply.entriesBounds.to = entriesIndexTo
 			n.appendEntriesReplyCh <- reply
 		}()
 	}
@@ -317,15 +494,10 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 		LastLogTerm:  0,
 	}
 	for _, peer := range n.peers {
-		n.rpcWg.Add(1)
 		go func() {
-			defer n.rpcWg.Done()
 			n.logger.dlog3("send RequestVote", "peer", peer, "args", args)
 			reply, err := n.transport.RequestVote(ctx, peer, args)
 			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					n.logger.dlog("RequestVote failed", "peer", peer, "error", err)
-				}
 				return
 			}
 			reply.Peer = peer

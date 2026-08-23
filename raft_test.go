@@ -14,6 +14,7 @@ import (
 	"time"
 
 	. "github.com/homeakuzin/raft"
+	main "github.com/homeakuzin/raft"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,6 +56,34 @@ func TestLeaderIsElected(t *testing.T) {
 	snapshot := cluster.waitHealthy()
 	for _, followerID := range snapshot.followerIDs {
 		require.Equal(t, snapshot.leaderTerm, snapshot.terms[followerID])
+	}
+}
+
+func TestLeaderReplicatedClientCommands(t *testing.T) {
+	t.Parallel()
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+	cluster.waitHealthy()
+	leader := cluster.leader()
+	t.Log("send first command")
+	cmd1 := []byte{'r', 'a', 'f', 't'}
+	// err := leader.ClientCommand(t.Context(), cmd1)
+	// require.NoError(t, err)
+	go leader.ClientCommand(t.Context(), cmd1)
+	cluster.waitAllHaveCommitIndex(1)
+	for _, n := range cluster.nodes {
+		logs := n.StateMachine().Logs()
+		require.Len(t, logs, 1)
+		require.Equal(t, cmd1, logs[0].Data)
+	}
+	t.Log("send second command")
+	cmd2 := []byte{'g', 'o'}
+	go leader.ClientCommand(t.Context(), cmd2)
+	cluster.waitAllHaveCommitIndex(2)
+	for _, n := range cluster.nodes {
+		logs := n.StateMachine().Logs()
+		require.Len(t, logs, 2)
+		require.Equal(t, cmd2, logs[1].Data)
 	}
 }
 
@@ -228,6 +257,15 @@ func (c *networkTestCluster) Shutdown(ctx context.Context) {
 	}
 }
 
+func (c *networkTestCluster) leader() *Node {
+	for _, n := range c.nodes {
+		if n.State() == main.Leader {
+			return n
+		}
+	}
+	return nil
+}
+
 func (c *networkTestCluster) nodesByID(ids ...NodeId) []*Node {
 	nodes := make([]*Node, 0, len(ids))
 	for _, id := range ids {
@@ -266,6 +304,36 @@ func (c *networkTestCluster) waitHealthy() clusterSnapshot {
 	}
 	c.t.Fatalf("cluster is not healthy: %+v", stateMap)
 	return clusterSnapshot{}
+}
+
+func (c *networkTestCluster) waitAllHaveCommitIndex(commitIndex int) {
+	c.t.Helper()
+
+	maxRetries := 50
+	retries := 0
+	pollInterval := time.Millisecond * 15
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	stateMap := map[State][]NodeId{}
+
+	for range ticker.C {
+		retries++
+		if retries == maxRetries {
+			break
+		}
+		assertion := true
+		for _, n := range c.nodes {
+			if n.CommitIndex() < commitIndex {
+				assertion = false
+				break
+			}
+		}
+		if assertion {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	c.t.Fatalf("never commited index %d: %+v", commitIndex, stateMap)
 }
 
 func peersFor(id NodeId) []NodeId {
