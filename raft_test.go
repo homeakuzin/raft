@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -51,36 +50,9 @@ func TestMain(m *testing.M) {
 
 func TestLeaderIsElected(t *testing.T) {
 	t.Parallel()
-
-	ln1, err := net.Listen("tcp", "0.0.0.0:0")
-	require.NoError(t, err)
-	ln2, err := net.Listen("tcp", "0.0.0.0:0")
-	require.NoError(t, err)
-	ln3, err := net.Listen("tcp", "0.0.0.0:0")
-	require.NoError(t, err)
-
-	addrs := map[NodeId]string{
-		Node1: ln1.Addr().String(),
-		Node2: ln2.Addr().String(),
-		Node3: ln3.Addr().String(),
-	}
-	logger1 := logger(t, Node1)
-	logger2 := logger(t, Node2)
-	logger3 := logger(t, Node3)
-	n1 := NewNode(Node1, []NodeId{Node2, Node3}, logger1, NewHttpTransport(ln1, Node1, addrs, logger1)).SetTimeouts(testingTimeouts)
-	n2 := NewNode(Node2, []NodeId{Node1, Node3}, logger2, NewHttpTransport(ln2, Node2, addrs, logger2)).SetTimeouts(testingTimeouts)
-	n3 := NewNode(Node3, []NodeId{Node1, Node2}, logger3, NewHttpTransport(ln3, Node3, addrs, logger3)).SetTimeouts(testingTimeouts)
-	ctx := t.Context()
-	nodes := []*Node{n1, n2, n3}
-	defer func() {
-		for _, n := range nodes {
-			n.Shutdown(ctx)
-		}
-	}()
-	go n1.Run(ctx)
-	go n2.Run(ctx)
-	go n3.Run(ctx)
-	snapshot := waitLeaderAmong(t, nodes)
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+	snapshot := cluster.waitHealthy()
 	for _, followerID := range snapshot.followerIDs {
 		require.Equal(t, snapshot.leaderTerm, snapshot.terms[followerID])
 	}
@@ -360,7 +332,7 @@ func statesByState(states map[NodeId]State) map[State][]NodeId {
 }
 
 type coloredLogWriter struct {
-	w      io.Writer
+	t      testing.TB
 	color  string
 	prefix string
 }
@@ -371,16 +343,16 @@ func (w coloredLogWriter) Write(p []byte) (int, error) {
 	logColorMu.Lock()
 	defer logColorMu.Unlock()
 
-	if _, err := fmt.Fprintf(w.w, "%s%s\x1b[0m ", w.color, w.prefix); err != nil {
+	if _, err := fmt.Fprintf(w.t.Output(), "%s%s\x1b[0m ", w.color, w.prefix); err != nil {
 		return 0, err
 	}
-	return w.w.Write(p)
+	return w.t.Output().Write(p)
 }
 
 func logger(t testing.TB, nodeID NodeId) *RaftLogger {
 	level := slog.LevelDebug
 	return NewRaftLogger(slog.New(slog.NewTextHandler(coloredLogWriter{
-		w:      t.Output(),
+		t:      t,
 		color:  nodeLogColors[nodeID],
 		prefix: fmt.Sprintf("[Node%d]", nodeID),
 	}, &slog.HandlerOptions{Level: level}))).DebugLevel(*flagDebugLevel)
