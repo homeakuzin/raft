@@ -164,10 +164,11 @@ type Node struct {
 	log          *logStorage
 	stateMachine *StateMachine
 
-	commitIndex     int
-	lastApplied     int
-	nextIndex       map[NodeId]int
-	clientCommandCh chan clientCommand
+	commitIndex           int
+	lastApplied           int
+	nextIndex             map[NodeId]int
+	clientCommandCh       chan clientCommand
+	clientCommandIndexMap map[int]clientCommand
 
 	peers          []NodeId
 	transport      Transport
@@ -188,20 +189,22 @@ type Node struct {
 
 func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport) *Node {
 	return &Node{
-		mu:           &sync.Mutex{},
-		id:           id,
-		logger:       logger,
-		peers:        peers,
-		transport:    transport,
-		shutdownCh:   make(chan struct{}),
-		timeouts:     DefaultNodeTimeouts,
-		log:          &logStorage{},
-		stateMachine: &StateMachine{},
+		mu:                    &sync.Mutex{},
+		id:                    id,
+		logger:                logger,
+		peers:                 peers,
+		transport:             transport,
+		shutdownCh:            make(chan struct{}),
+		timeouts:              DefaultNodeTimeouts,
+		log:                   &logStorage{},
+		stateMachine:          &StateMachine{},
+		clientCommandIndexMap: make(map[int]clientCommand),
 	}
 }
 
 func (n *Node) ClientCommand(ctx context.Context, command []byte) error {
-	c := clientCommand{command, make(chan error)}
+	c := clientCommand{command, make(chan error, 1)}
+	defer close(c.replicated)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -332,10 +335,17 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 				quorumMatchIndex := matched[(len(matched)-1)/2]
 
 				if quorumMatchIndex > n.commitIndex {
-					newLogs := n.log.slice(n.commitIndex+1, quorumMatchIndex+1)
-					n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", quorumMatchIndex, "new_logs_count", len(newLogs))
+					oldIndex := n.commitIndex
+					newLogs := n.log.slice(oldIndex+1, quorumMatchIndex+1)
+					n.logger.dlog("update commit index", "old_commit_index", oldIndex, "newCommitIndex", quorumMatchIndex, "new_logs_count", len(newLogs))
 					n.stateMachine.apply(newLogs...)
 					n.commitIndex = quorumMatchIndex
+					for i := oldIndex; i <= quorumMatchIndex; i++ {
+						if clientCommand, isClientPending := n.clientCommandIndexMap[i]; isClientPending {
+							n.logger.dlog3("respond to client", "log_index", i)
+							clientCommand.replicated <- nil
+						}
+					}
 				}
 			}
 		}
@@ -345,11 +355,13 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			clientCommand.replicated <- errors.New("not a leader")
 			return
 		}
-		n.log.append(Log{
+		log := Log{
 			Term:  n.currentTerm,
 			Index: n.log.len(),
 			Data:  clientCommand.data,
-		})
+		}
+		n.log.append(log)
+		n.clientCommandIndexMap[log.Index] = clientCommand
 		n.sendAppendEntries(ctx)
 		n.resetHeartbeatTimer()
 

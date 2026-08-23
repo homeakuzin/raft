@@ -67,18 +67,17 @@ func TestLeaderReplicatedClientCommands(t *testing.T) {
 	leader := cluster.leader()
 	t.Log("send first command")
 	cmd1 := []byte{'r', 'a', 'f', 't'}
-	// err := leader.ClientCommand(t.Context(), cmd1)
-	// require.NoError(t, err)
-	go leader.ClientCommand(t.Context(), cmd1)
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd1))
 	cluster.waitAllHaveCommitIndex(1)
 	for _, n := range cluster.nodes {
 		logs := n.StateMachine().Logs()
 		require.Len(t, logs, 1)
 		require.Equal(t, cmd1, logs[0].Data)
 	}
+
 	t.Log("send second command")
 	cmd2 := []byte{'g', 'o'}
-	go leader.ClientCommand(t.Context(), cmd2)
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd2))
 	cluster.waitAllHaveCommitIndex(2)
 	for _, n := range cluster.nodes {
 		logs := n.StateMachine().Logs()
