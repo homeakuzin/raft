@@ -22,9 +22,11 @@ var flagDebugLevel = flag.Int("debug", 0, "node debug level")
 var flagPprofAddr = flag.String("pprof", "", "serve pprof on the given address, e.g. localhost:6060")
 
 var testingTimeouts = NodeTimeouts{
-	Election:  15 * time.Millisecond,
+	Election:  25 * time.Millisecond,
 	Heartbeat: 5 * time.Millisecond,
 }
+
+const pollInterval = time.Millisecond * 20
 
 var nodeLogColors = map[NodeId]string{
 	Node1: "\x1b[34m",
@@ -65,20 +67,54 @@ func TestLeaderReplicatedClientCommands(t *testing.T) {
 	cluster.Run(t.Context())
 	cluster.waitHealthy()
 	leader := cluster.leader()
-	t.Log("send first command")
+	t.Logf("send first command to %s", leader.Id())
 	cmd1 := []byte{'r', 'a', 'f', 't'}
 	require.NoError(t, leader.ClientCommand(t.Context(), cmd1))
-	cluster.waitAllHaveCommitIndex(1)
+	cluster.waitNodesHaveCommitIndex(1, cluster.nodes)
 	for _, n := range cluster.nodes {
 		logs := n.StateMachine().Logs()
-		require.Len(t, logs, 1)
-		require.Equal(t, cmd1, logs[0].Data)
+		require.Len(t, logs, 1, n.Id())
+		require.Equal(t, cmd1, logs[0].Data, n.Id())
 	}
 
-	t.Log("send second command")
+	t.Logf("send second command to %s", leader.Id())
 	cmd2 := []byte{'g', 'o'}
 	require.NoError(t, leader.ClientCommand(t.Context(), cmd2))
-	cluster.waitAllHaveCommitIndex(2)
+	cluster.waitNodesHaveCommitIndex(2, cluster.nodes)
+	for _, n := range cluster.nodes {
+		logs := n.StateMachine().Logs()
+		require.Len(t, logs, 2, n.Id())
+		require.Equal(t, cmd1, logs[0].Data, n.Id())
+		require.Equal(t, cmd2, logs[1].Data, n.Id())
+	}
+}
+
+func TestNodeRecoversStateAfterFailure(t *testing.T) {
+	t.Parallel()
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+	clusterSnapshot := cluster.waitHealthy()
+
+	initialLeader := cluster.leader()
+	t.Logf("send first command to %s", initialLeader.Id())
+	cmd1 := []byte{'r', 'a', 'f', 't'}
+	require.NoError(t, initialLeader.ClientCommand(t.Context(), cmd1))
+	cluster.waitNodesHaveCommitIndex(1, cluster.nodes)
+
+	t.Log("partition first leader")
+	cluster.conditions.Cut(initialLeader.Id(), clusterSnapshot.followerIDs[0])
+	cluster.conditions.Cut(initialLeader.Id(), clusterSnapshot.followerIDs[1])
+	clusterSnapshot = waitLeaderAmong(t, cluster.nodesByID(clusterSnapshot.followerIDs...))
+
+	t.Logf("send second command to %s", clusterSnapshot.leaderID)
+	cmd2 := []byte{'g', 'o'}
+	require.NoError(t, cluster.nodesByID(clusterSnapshot.leaderID)[0].ClientCommand(t.Context(), cmd2))
+	cluster.waitNodesHaveCommitIndex(2, cluster.nodesByID(clusterSnapshot.followerIDs...))
+
+	t.Log("restore initial leader")
+	cluster.conditions.Heal(initialLeader.Id(), clusterSnapshot.followerIDs[0])
+	cluster.conditions.Heal(initialLeader.Id(), clusterSnapshot.leaderID)
+	cluster.waitNodesHaveCommitIndex(2, cluster.nodes)
 	for _, n := range cluster.nodes {
 		logs := n.StateMachine().Logs()
 		require.Len(t, logs, 2)
@@ -177,6 +213,7 @@ func TestLeaderPartitionElectsNewLeaderInMajority(t *testing.T) {
 	require.Greater(t, elected.leaderTerm, initial.leaderTerm)
 }
 
+// TODO *Node instead of NodeId
 type clusterSnapshot struct {
 	leaderID    NodeId
 	leaderTerm  int
@@ -188,7 +225,6 @@ type clusterSnapshot struct {
 func waitLeaderAmong(t testing.TB, nodes []*Node) clusterSnapshot {
 	maxRetries := 50
 	retries := 0
-	pollInterval := time.Millisecond * 15
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	stateMap := map[State][]NodeId{}
@@ -283,7 +319,6 @@ func (c *networkTestCluster) waitHealthy() clusterSnapshot {
 
 	maxRetries := 50
 	retries := 0
-	pollInterval := time.Millisecond * 15
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	stateMap := map[State][]NodeId{}
@@ -305,12 +340,11 @@ func (c *networkTestCluster) waitHealthy() clusterSnapshot {
 	return clusterSnapshot{}
 }
 
-func (c *networkTestCluster) waitAllHaveCommitIndex(commitIndex int) {
+func (c *networkTestCluster) waitNodesHaveCommitIndex(commitIndex int, nodes []*Node) {
 	c.t.Helper()
 
 	maxRetries := 50
 	retries := 0
-	pollInterval := time.Millisecond * 15
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	stateMap := map[State][]NodeId{}
@@ -321,7 +355,7 @@ func (c *networkTestCluster) waitAllHaveCommitIndex(commitIndex int) {
 			break
 		}
 		assertion := true
-		for _, n := range c.nodes {
+		for _, n := range nodes {
 			if n.CommitIndex() < commitIndex {
 				assertion = false
 				break
@@ -410,6 +444,7 @@ func (w coloredLogWriter) Write(p []byte) (int, error) {
 	logColorMu.Lock()
 	defer logColorMu.Unlock()
 
+	// TODO this causes data race sometimes
 	if _, err := fmt.Fprintf(w.t.Output(), "%s%s\x1b[0m ", w.color, w.prefix); err != nil {
 		return 0, err
 	}

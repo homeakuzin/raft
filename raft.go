@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,10 @@ const (
 	Node2
 	Node3
 )
+
+func (id NodeId) String() string {
+	return "Node" + strconv.Itoa(int(id))
+}
 
 type State string
 
@@ -141,6 +146,12 @@ type StateMachine struct {
 	logs []Log
 }
 
+func (sm *StateMachine) Len() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return len(sm.logs)
+}
+
 func (sm *StateMachine) Logs() []Log {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -161,7 +172,7 @@ type Node struct {
 	votedFor     NodeId
 	currentTerm  int
 	state        State
-	log          *logStorage
+	logStorage   *logStorage
 	stateMachine *StateMachine
 
 	commitIndex           int
@@ -196,7 +207,7 @@ func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport)
 		transport:             transport,
 		shutdownCh:            make(chan struct{}),
 		timeouts:              DefaultNodeTimeouts,
-		log:                   &logStorage{},
+		logStorage:            &logStorage{},
 		stateMachine:          &StateMachine{},
 		clientCommandIndexMap: make(map[int]clientCommand),
 	}
@@ -318,7 +329,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		n.sendAppendEntries(ctx)
 		n.resetHeartbeatTimer()
 	case reply := <-n.appendEntriesReplyCh:
-		n.logger.dlog2("handle AppendEntries reply", "peer", reply.Peer, "reply", reply)
+		n.logger.dlog2("handle AppendEntries reply", "peer", reply.Peer, "reply", reply, "next_index", n.nextIndex)
 		if reply.Term > n.currentTerm {
 			n.becomeFollower(reply.Term)
 			return
@@ -332,11 +343,15 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 					matched = append(matched, idx-1)
 				}
 				slices.Sort(matched)
-				quorumMatchIndex := matched[(len(matched)-1)/2]
+
+				var quorumMatchIndex int
+				if len(n.nextIndex) == 2 {
+					quorumMatchIndex = matched[1]
+				}
 
 				if quorumMatchIndex > n.commitIndex {
 					oldIndex := n.commitIndex
-					newLogs := n.log.slice(oldIndex+1, quorumMatchIndex+1)
+					newLogs := n.logStorage.slice(oldIndex+1, quorumMatchIndex+1)
 					n.logger.dlog("update commit index", "old_commit_index", oldIndex, "newCommitIndex", quorumMatchIndex, "new_logs_count", len(newLogs))
 					n.stateMachine.apply(newLogs...)
 					n.commitIndex = quorumMatchIndex
@@ -357,47 +372,58 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		}
 		log := Log{
 			Term:  n.currentTerm,
-			Index: n.log.len(),
+			Index: n.logStorage.len(),
 			Data:  clientCommand.data,
 		}
-		n.log.append(log)
+		n.logStorage.append(log)
 		n.clientCommandIndexMap[log.Index] = clientCommand
 		n.sendAppendEntries(ctx)
 		n.resetHeartbeatTimer()
 
 	case appendEntries := <-n.appendEntriesRpcCh:
-		n.logger.dlog2("handle AppendEntries call", "peer", appendEntries.args.LeaderId, "args", appendEntries.args)
+		n.logger.dlog2("handle AppendEntries call", "args", appendEntries.args)
 		var reply AppendEntriesReply
+		defer func() {
+			appendEntries.replyCh <- reply
+		}()
 		reply.Peer = n.id
 		reply.Term = n.currentTerm
 		reply.Success = false
-		if appendEntries.args.Term >= n.currentTerm {
-			reply.Success = true
-			n.becomeFollower(appendEntries.args.Term)
+		if appendEntries.args.Term < n.currentTerm {
+			return
+		}
+		reply.Success = true
+		n.becomeFollower(appendEntries.args.Term)
 
-			if appendEntries.args.PrevLogIndex > 0 {
-				if n.log.len() >= appendEntries.args.PrevLogIndex {
-					logAtPrevLogIndex := n.log.at(appendEntries.args.PrevLogIndex)
-					if logAtPrevLogIndex.Term != appendEntries.args.PrevLogTerm {
-						reply.Success = false
-						n.log.clearFrom(appendEntries.args.PrevLogIndex)
-					}
-				}
-			}
-
-			if reply.Success {
-				// TODO maybe some of args.Entries are already in the log
-				n.log.append(appendEntries.args.Entries...)
-
-				if appendEntries.args.LeaderCommit > n.commitIndex {
-					newLogs := n.log.slice(n.commitIndex+1, appendEntries.args.LeaderCommit+1)
-					n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", appendEntries.args.LeaderCommit, "new_logs_count", len(newLogs))
-					n.stateMachine.apply(newLogs...)
-					n.commitIndex = appendEntries.args.LeaderCommit
+		if appendEntries.args.PrevLogIndex > 0 {
+			if n.logStorage.len() >= appendEntries.args.PrevLogIndex {
+				logAtPrevLogIndex := n.logStorage.at(appendEntries.args.PrevLogIndex)
+				if logAtPrevLogIndex.Term != appendEntries.args.PrevLogTerm {
+					reply.Success = false
+					n.logStorage.clearFrom(appendEntries.args.PrevLogIndex)
+					return
 				}
 			}
 		}
-		appendEntries.replyCh <- reply
+
+		if len(appendEntries.args.Entries) > 0 {
+			for _, log := range appendEntries.args.Entries {
+				if log.Index < n.logStorage.len() {
+					n.logger.dlog3("log already replicated", "log", log)
+					reply.Success = false
+					return
+				}
+				n.logStorage.append(log)
+			}
+			n.logger.dlog3("append log entries", "args", appendEntries.args, "logs_count", n.logStorage.len())
+		}
+
+		if appendEntries.args.LeaderCommit > n.commitIndex {
+			newLogs := n.logStorage.slice(n.commitIndex+1, appendEntries.args.LeaderCommit+1)
+			n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", appendEntries.args.LeaderCommit, "new_logs_count", len(newLogs))
+			n.stateMachine.apply(newLogs...)
+			n.commitIndex = appendEntries.args.LeaderCommit
+		}
 
 	case <-n.electionTimer.C:
 		n.logger.dlog("start election", "new_term", n.currentTerm+1)
@@ -421,6 +447,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			if votes*2 > len(n.peers)+1 {
 				n.logger.dlog("become leader")
 				n.state = Leader
+				for _, id := range n.peers {
+					n.nextIndex[id] = n.logStorage.len() + 1
+				}
 				n.sendAppendEntries(ctx)
 				n.resetHeartbeatTimer()
 				n.electionTimer.Stop()
@@ -470,14 +499,14 @@ func (n *Node) sendAppendEntries(ctx context.Context) {
 		}
 		args.PrevLogIndex = n.nextIndex[peer] - 1
 		if args.PrevLogIndex > 0 {
-			args.PrevLogTerm = n.log.at(args.PrevLogIndex).Term
+			args.PrevLogTerm = n.logStorage.at(args.PrevLogIndex).Term
 		}
-		lastLogIndex := n.log.len()
+		lastLogIndex := n.logStorage.len()
 		var entriesIndexFrom, entriesIndexTo int
 		if lastLogIndex >= n.nextIndex[peer] {
 			entriesIndexFrom = n.nextIndex[peer]
-			entriesIndexTo = n.log.len()
-			entries := n.log.slice(entriesIndexFrom, entriesIndexTo+1)
+			entriesIndexTo = n.logStorage.len()
+			entries := n.logStorage.slice(entriesIndexFrom, entriesIndexTo+1)
 			args.Entries = make([]Log, len(entries))
 			copy(args.Entries, entries)
 		}
