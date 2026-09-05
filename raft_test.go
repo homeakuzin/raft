@@ -22,8 +22,8 @@ var flagDebugLevel = flag.Int("debug", 0, "node debug level")
 var flagPprofAddr = flag.String("pprof", "", "serve pprof on the given address, e.g. localhost:6060")
 
 var testingTimeouts = NodeTimeouts{
-	Election:  15 * time.Millisecond,
-	Heartbeat: 2 * time.Millisecond,
+	Election:  25 * time.Millisecond,
+	Heartbeat: 5 * time.Millisecond,
 }
 
 const pollInterval = time.Millisecond * 20
@@ -101,7 +101,7 @@ func TestNodeRecoversStateAfterFailure(t *testing.T) {
 	require.NoError(t, initialLeader.ClientCommand(t.Context(), cmd1))
 	cluster.waitNodesHaveCommitIndex(1, cluster.nodes)
 
-	t.Log("partition first leader")
+	t.Logf("cut leader %s", initialLeader.Id())
 	cluster.conditions.Cut(initialLeader.Id(), clusterSnapshot.followerIDs[0])
 	cluster.conditions.Cut(initialLeader.Id(), clusterSnapshot.followerIDs[1])
 	clusterSnapshot = waitLeaderAmong(t, cluster.nodesByID(clusterSnapshot.followerIDs...))
@@ -122,7 +122,7 @@ func TestNodeRecoversStateAfterFailure(t *testing.T) {
 	}
 }
 
-func TestPartitionHealConvergesToSingleLeader(t *testing.T) {
+func TestNewLeaderIsElectedWhenInitialIsUnavailable(t *testing.T) {
 	t.Parallel()
 
 	cluster := newHTTPNetworkTestCluster(t)
@@ -195,22 +195,72 @@ func TestHighLatencyFollowerRecovers(t *testing.T) {
 	require.GreaterOrEqual(t, recovered.leaderTerm, initial.leaderTerm)
 }
 
-func TestLeaderPartitionElectsNewLeaderInMajority(t *testing.T) {
+func TestClientCommandBlocksAndNodCommitedUntilReplicated(t *testing.T) {
 	t.Parallel()
 
 	cluster := newHTTPNetworkTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
-
+	initialLeader := cluster.leader()
 	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[0])
 	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[1])
 
-	elected := waitLeaderAmong(t, cluster.nodesByID(initial.followerIDs...))
+	t.Logf("send first command to %s", initialLeader.Id())
+	cmd1 := []byte{'r', 'a', 'f', 't'}
 
-	require.NotEqual(t, initial.leaderID, elected.leaderID)
-	require.Len(t, elected.followerIDs, 1)
-	require.Greater(t, elected.leaderTerm, initial.leaderTerm)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	clientCommandResult := make(chan error)
+	go func() {
+		clientCommandResult <- initialLeader.ClientCommand(ctx, cmd1)
+	}()
+	time.Sleep(testingTimeouts.Election)
+	cancel()
+	require.ErrorIs(t, <-clientCommandResult, context.Canceled)
+	require.Equal(t, 0, initialLeader.CommitIndex())
+}
+
+func TestClusterDiscardsCorruptedEntries(t *testing.T) {
+	t.Parallel()
+
+	cluster := newHTTPNetworkTestCluster(t)
+	cluster.Run(t.Context())
+
+	initial := cluster.waitHealthy()
+	initialLeader := cluster.leader()
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[0])
+	cluster.conditions.Cut(initial.leaderID, initial.followerIDs[1])
+
+	t.Logf("send commands to %s", initialLeader.Id())
+	initialLeaderCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	clientCommandResult := make(chan error, 2)
+	go func() {
+		clientCommandResult <- initialLeader.ClientCommand(initialLeaderCtx, []byte{'e', 'r', 'r'})
+		clientCommandResult <- initialLeader.ClientCommand(initialLeaderCtx, []byte{'o', 'r'})
+		close(clientCommandResult)
+	}()
+
+	time.Sleep(testingTimeouts.Election)
+	cancel()
+
+	for err := range clientCommandResult {
+		require.ErrorIs(t, err, context.Canceled)
+	}
+	require.Equal(t, 0, initialLeader.CommitIndex())
+
+	leader := cluster.nodesByID(waitLeaderAmong(t, cluster.nodesByID(initial.followerIDs...)).leaderID)[0]
+	cmd3 := []byte{'h', 'e', 'a', 'l'}
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd3))
+
+	cluster.conditions.Heal(initial.leaderID, initial.followerIDs[0])
+	cluster.conditions.Heal(initial.leaderID, initial.followerIDs[1])
+	cluster.waitNodesHaveCommitIndex(1, cluster.nodes)
+
+	require.Equal(t, 1, initialLeader.StateMachine().Len())
+	require.Equal(t, cmd3, initialLeader.StateMachine().Logs()[0].Data)
 }
 
 // TODO *Node instead of NodeId

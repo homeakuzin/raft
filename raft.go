@@ -134,7 +134,7 @@ func (s *logStorage) clearFrom(i int) {
 	if i < 1 {
 		panic("logStorage index starts with 1")
 	}
-	s.items = s.items[:i]
+	s.items = s.items[:i-1]
 }
 
 func (s *logStorage) append(log ...Log) {
@@ -356,7 +356,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 					n.stateMachine.apply(newLogs...)
 					n.commitIndex = quorumMatchIndex
 					for i := oldIndex; i <= quorumMatchIndex; i++ {
-						if clientCommand, isClientPending := n.clientCommandIndexMap[i]; isClientPending {
+						if clientCommand, isClientPending := n.clientCommandIndexMap[i+1]; isClientPending {
 							n.logger.dlog3("respond to client", "log_index", i)
 							clientCommand.replicated <- nil
 						}
@@ -372,7 +372,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		}
 		log := Log{
 			Term:  n.currentTerm,
-			Index: n.logStorage.len(),
+			Index: n.logStorage.len() + 1,
 			Data:  clientCommand.data,
 		}
 		n.logStorage.append(log)
@@ -395,10 +395,11 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		reply.Success = true
 		n.becomeFollower(appendEntries.args.Term)
 
-		if appendEntries.args.PrevLogIndex > 0 {
-			if n.logStorage.len() >= appendEntries.args.PrevLogIndex {
+		if n.logStorage.len() >= appendEntries.args.PrevLogIndex {
+			if appendEntries.args.PrevLogIndex > 0 {
 				logAtPrevLogIndex := n.logStorage.at(appendEntries.args.PrevLogIndex)
 				if logAtPrevLogIndex.Term != appendEntries.args.PrevLogTerm {
+					n.logger.dlog3("conflicting entry at PrevLogIndex", "args", appendEntries.args, "current_at_prev_log_index", logAtPrevLogIndex)
 					reply.Success = false
 					n.logStorage.clearFrom(appendEntries.args.PrevLogIndex)
 					return
@@ -408,8 +409,16 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 
 		if len(appendEntries.args.Entries) > 0 {
 			for _, log := range appendEntries.args.Entries {
-				if log.Index < n.logStorage.len() {
-					n.logger.dlog3("log already replicated", "log", log)
+				if log.Index <= n.logStorage.len() {
+					current := n.logStorage.at(log.Index)
+					if current.Term == log.Term {
+						n.logger.dlog3("log already replicated", "log", log)
+					} else {
+						n.logger.dlog3("conflicting entry", "log", log, "current_at_this_index", current)
+						reply.Success = false
+						n.logStorage.clearFrom(log.Index)
+						return
+					}
 				} else {
 					n.logStorage.append(log)
 				}
