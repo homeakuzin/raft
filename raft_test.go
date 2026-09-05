@@ -22,8 +22,8 @@ var flagDebugLevel = flag.Int("debug", 0, "node debug level")
 var flagPprofAddr = flag.String("pprof", "", "serve pprof on the given address, e.g. localhost:6060")
 
 var testingTimeouts = NodeTimeouts{
-	Election:  25 * time.Millisecond,
-	Heartbeat: 5 * time.Millisecond,
+	Election:  15 * time.Millisecond,
+	Heartbeat: 2 * time.Millisecond,
 }
 
 const pollInterval = time.Millisecond * 20
@@ -61,7 +61,7 @@ func TestLeaderIsElected(t *testing.T) {
 	}
 }
 
-func TestLeaderReplicatedClientCommands(t *testing.T) {
+func TestLeaderReplicatesClientCommands(t *testing.T) {
 	t.Parallel()
 	cluster := newHTTPNetworkTestCluster(t)
 	cluster.Run(t.Context())

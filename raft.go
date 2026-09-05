@@ -410,10 +410,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			for _, log := range appendEntries.args.Entries {
 				if log.Index < n.logStorage.len() {
 					n.logger.dlog3("log already replicated", "log", log)
-					reply.Success = false
-					return
+				} else {
+					n.logStorage.append(log)
 				}
-				n.logStorage.append(log)
 			}
 			n.logger.dlog3("append log entries", "args", appendEntries.args, "logs_count", n.logStorage.len())
 		}
@@ -585,85 +584,6 @@ func (l *RaftLogger) dlog3(msg string, args ...any) {
 	}
 }
 
-type MemoryTransport struct {
-	mu                    sync.RWMutex
-	nodeId                NodeId
-	peers                 map[NodeId]*MemoryTransport
-	requestVoteCallback   func(args RequestVoteArgs, replyCh chan<- RequestVoteReply)
-	appendEntriesCallback func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply)
-	shutdownCh            chan struct{}
-	shutdown              bool
-}
-
-func NewMemoryTransport(nodeId NodeId, peers map[NodeId]*MemoryTransport) *MemoryTransport {
-	return &MemoryTransport{
-		nodeId:     nodeId,
-		peers:      peers,
-		shutdownCh: make(chan struct{}),
-	}
-}
-
-func (t *MemoryTransport) Serve(ctx context.Context, requestVoteCallback func(args RequestVoteArgs, replyCh chan<- RequestVoteReply), appendEntriesCallback func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply)) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.requestVoteCallback = requestVoteCallback
-	t.appendEntriesCallback = appendEntriesCallback
-	return nil
-}
-
-func (t *MemoryTransport) Shutdown(ctx context.Context) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if !t.shutdown {
-		close(t.shutdownCh)
-		t.shutdown = true
-	}
-}
-
-func (t *MemoryTransport) RequestVote(ctx context.Context, peer NodeId, data RequestVoteArgs) (RequestVoteReply, error) {
-	peerTransport := t.peers[peer]
-
-	peerTransport.mu.RLock()
-	requestVoteCallback := peerTransport.requestVoteCallback
-	peerTransport.mu.RUnlock()
-
-	replyCh := make(chan RequestVoteReply, 1)
-	requestVoteCallback(data, replyCh)
-	select {
-	case <-ctx.Done():
-		return RequestVoteReply{}, ctx.Err()
-	case <-t.shutdownCh:
-		return RequestVoteReply{}, fmt.Errorf("memory transport %d is shut down", t.nodeId)
-	case <-peerTransport.shutdownCh:
-		return RequestVoteReply{}, fmt.Errorf("memory transport peer %d is shut down", peer)
-	case reply := <-replyCh:
-		return reply, nil
-	}
-}
-
-func (t *MemoryTransport) AppendEntries(ctx context.Context, peer NodeId, data AppendEntriesArgs) (AppendEntriesReply, error) {
-	peerTransport := t.peers[peer]
-
-	peerTransport.mu.RLock()
-	appendEntriesCallback := peerTransport.appendEntriesCallback
-	peerTransport.mu.RUnlock()
-
-	replyCh := make(chan AppendEntriesReply, 1)
-	appendEntriesCallback(data, replyCh)
-	select {
-	case <-ctx.Done():
-		return AppendEntriesReply{}, ctx.Err()
-	case <-t.shutdownCh:
-		return AppendEntriesReply{}, fmt.Errorf("memory transport %d is shut down", t.nodeId)
-	case <-peerTransport.shutdownCh:
-		return AppendEntriesReply{}, fmt.Errorf("memory transport peer %d is shut down", peer)
-	case reply := <-replyCh:
-		return reply, nil
-	}
-}
-
 type HttpPeerTransport struct {
 	ln     net.Listener
 	nodeId NodeId
@@ -710,7 +630,7 @@ func (h httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(body, &args); err != nil {
 			w.WriteHeader(400)
 		}
-		replyCh := make(chan RequestVoteReply)
+		replyCh := make(chan RequestVoteReply, 1)
 		h.requestVoteCallback(args, replyCh)
 		reply := <-replyCh
 		responseBody, err := json.Marshal(&reply)
@@ -725,7 +645,7 @@ func (h httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(body, &args); err != nil {
 			w.WriteHeader(400)
 		}
-		replyCh := make(chan AppendEntriesReply)
+		replyCh := make(chan AppendEntriesReply, 1)
 		h.appendEntriesCallback(args, replyCh)
 		reply := <-replyCh
 		responseBody, err := json.Marshal(&reply)
