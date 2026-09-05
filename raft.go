@@ -279,18 +279,18 @@ func (n *Node) Run(ctx context.Context) error {
 	n.requestVoteReplyCh = make(chan RequestVoteReply, len(n.peers))
 	n.appendEntriesRpcCh = make(chan appendEntriesRpc, len(n.peers))
 	n.appendEntriesReplyCh = make(chan AppendEntriesReply, len(n.peers))
-	n.currentElectionVotes = make(map[NodeId]bool, len(n.peers))
 	n.clientCommandCh = make(chan clientCommand)
+
+	n.currentElectionVotes = make(map[NodeId]bool, len(n.peers))
 	n.nextIndex = make(map[NodeId]int)
+
 	for _, id := range n.peers {
 		n.nextIndex[id] = 1
 	}
 
 	if err := n.transport.Serve(ctx, func(args RequestVoteArgs, replyCh chan<- RequestVoteReply) {
-		n.logger.dlog2("received RequestVote", "args", args)
 		n.requestVoteRpcCh <- requestVoteRpc{args, replyCh}
 	}, func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply) {
-		n.logger.dlog2("received AppendEntries", "args", args)
 		n.appendEntriesRpcCh <- appendEntriesRpc{args, replyCh}
 	}); err != nil {
 		n.logger.ErrorContext(ctx, "could not serve raft transport", "error", err)
@@ -509,8 +509,8 @@ func (n *Node) sendAppendEntries(ctx context.Context) {
 			args.Entries = make([]Log, len(entries))
 			copy(args.Entries, entries)
 		}
+		n.logger.dlog3("send AppendEntries", "peer", peer, "args", args)
 		go func() {
-			n.logger.dlog3("send AppendEntries", "peer", peer, "args", args)
 			reply, err := n.transport.AppendEntries(ctx, peer, args)
 			if err != nil {
 				return
@@ -534,8 +534,8 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 		LastLogTerm:  0,
 	}
 	for _, peer := range n.peers {
+		n.logger.dlog3("send RequestVote", "peer", peer, "args", args)
 		go func() {
-			n.logger.dlog3("send RequestVote", "peer", peer, "args", args)
 			reply, err := n.transport.RequestVote(ctx, peer, args)
 			if err != nil {
 				return
