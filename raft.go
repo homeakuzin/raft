@@ -23,9 +23,9 @@ type NodeId string
 
 const (
 	None  NodeId = ""
-	Node1        = "1"
-	Node2        = "2"
-	Node3        = "3"
+	Node1 NodeId = "1"
+	Node2 NodeId = "2"
+	Node3 NodeId = "3"
 )
 
 func (id NodeId) String() string {
@@ -589,7 +589,9 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 			attribute.String("node.id", n.Id().String()),
 			attribute.String("peer_id", peer.String()),
 		))
+		ctx, cancel := context.WithTimeout(ctx, n.timeouts.Election)
 		go func() {
+			defer cancel()
 			reply, err := n.transport.RequestVote(ctx, peer, args)
 			if err != nil {
 				EndSpanWithError(span, err)

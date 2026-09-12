@@ -17,7 +17,7 @@ func BenchmarkCommandsToHealthyCluster(b *testing.B) {
 	cluster.waitHealthy()
 	leader := cluster.leader()
 
-	n := 1024 * 1024
+	n := 1024
 	commands := make([][]byte, b.N)
 	for i := 0; i < b.N; i++ {
 		commands[i] = command(n)
