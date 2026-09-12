@@ -19,7 +19,8 @@ jobs:
                   docker build . --target=test -t $IMAGE
                   docker run --rm $IMAGE
 
-    build-and-push:
+    push:
+        needs: test
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
