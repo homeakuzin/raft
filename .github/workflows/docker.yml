@@ -62,7 +62,7 @@ jobs:
                     set -eu
                     cd /opt/raft
                     docker compose pull raft
-                    docker compose up -d --no-deps --force-recreate
+                    docker compose up -d --no-deps --force-recreate raft
                     docker compose ps raft
                     "
                 done
@@ -86,7 +86,7 @@ jobs:
                     ssh "github@${host}" "
                     set -eu
                     cd /opt/raft
-                    docker compose stop
+                    docker compose stop raft
                     "
                 done
                 
@@ -99,7 +99,7 @@ jobs:
                     set -eu
                     cd /opt/raft
                     docker compose pull raft
-                    docker compose up -d --no-deps --force-recreate
+                    docker compose up -d --no-deps --force-recreate raft
                     docker compose ps raft
                     "
                 done
