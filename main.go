@@ -23,16 +23,15 @@ var flagRaftAddr = flag.String(raftAddrsFlag, "", "")
 
 func main() {
 	flag.Parse()
+	nodeId := NodeId(*flagNodeId)
 
 	logLevel := slog.LevelInfo
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(handler).With("node_id", nodeId))
 
-	nodeId := NodeId(*flagNodeId)
 	raftAddrMap := parseAndValidateAddrsFlag(flagRaftAddr, raftAddrsFlag, nodeId)
-
 	// clientAddrMap := parseAndValidateAddrsFlag(flagClientAddrs, clientAddrsFlag, nodeId)
 	// _ = clientAddrMap
 
