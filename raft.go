@@ -14,6 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type NodeId string
@@ -207,6 +210,8 @@ type Node struct {
 	appendEntriesRpcCh   chan appendEntriesRpc
 	requestVoteReplyCh   chan RequestVoteReply
 	appendEntriesReplyCh chan AppendEntriesReply
+
+	electionSpan trace.Span
 }
 
 func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport) *Node {
@@ -474,6 +479,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 				n.sendAppendEntries(ctx)
 				n.resetHeartbeatTimer()
 				n.electionTimer.Stop()
+				n.electionSpan.SetAttributes(attribute.String("result", "success"))
+				n.electionSpan.End()
+				n.electionSpan = nil
 			}
 		}
 	case requestVote := <-n.requestVoteRpcCh:
@@ -504,6 +512,11 @@ func (n *Node) becomeFollower(term int, leaderId NodeId) {
 	if n.state != Follower || n.currentTerm == 0 {
 		n.logger.Info("become follower", "term", term, "leader", leaderId.String())
 	}
+	if n.electionSpan != nil {
+		n.electionSpan.SetAttributes(attribute.String("result", "canceled"))
+		n.electionSpan.End()
+		n.electionSpan = nil
+	}
 	n.state = Follower
 	n.currentTerm = term
 	n.heartbeatTimer.Stop()
@@ -532,15 +545,21 @@ func (n *Node) sendAppendEntries(ctx context.Context) {
 			copy(args.Entries, entries)
 		}
 		n.logger.dlog3("send AppendEntries", "peer", peer, "args", args)
+		ctx, span := Tracer.Start(ctx, "AppendEntries", trace.WithAttributes(
+			attribute.String("node_id", n.Id().String()),
+			attribute.String("peer_id", peer.String()),
+		))
 		go func() {
 			reply, err := n.transport.AppendEntries(ctx, peer, args)
 			if err != nil {
+				EndSpanWithError(span, err)
 				return
 			}
 			reply.Peer = peer
 			reply.entriesBounds.from = entriesIndexFrom
 			reply.entriesBounds.to = entriesIndexTo
 			n.appendEntriesReplyCh <- reply
+			span.End()
 		}()
 	}
 }
@@ -555,15 +574,30 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 		LastLogIndex: 0,
 		LastLogTerm:  0,
 	}
+
+	if n.electionSpan != nil {
+		n.electionSpan.SetAttributes(attribute.String("result", "canceled"))
+		n.electionSpan.End()
+	}
+	ctx, n.electionSpan = Tracer.Start(ctx, "election", trace.WithAttributes(
+		attribute.String("node.id", n.Id().String()),
+	))
+
 	for _, peer := range n.peers {
 		n.logger.dlog3("send RequestVote", "peer", peer, "args", args)
+		ctx, span := Tracer.Start(ctx, "RequestVote", trace.WithAttributes(
+			attribute.String("node.id", n.Id().String()),
+			attribute.String("peer_id", peer.String()),
+		))
 		go func() {
 			reply, err := n.transport.RequestVote(ctx, peer, args)
 			if err != nil {
+				EndSpanWithError(span, err)
 				return
 			}
 			reply.Peer = peer
 			replyCh <- reply
+			span.End()
 		}()
 	}
 }

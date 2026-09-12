@@ -54,6 +54,18 @@ func main() {
 		}()
 	}
 
+	otelExportAddr := os.Getenv("OTEL_EXPORT_ADDR")
+	if otelExportAddr != "" {
+		serviceName := "raft"
+		slog.Info("exporting opentelemetry traces", "addr", otelExportAddr, "service_name", serviceName)
+		ctx := context.Background()
+		traceProvider, err := InitTracer(ctx, otelExportAddr, serviceName, true)
+		if err != nil {
+			slog.Error("could not start tracer", "error", err.Error())
+		}
+		defer traceProvider.Shutdown(ctx)
+	}
+
 	ln, err := net.Listen("tcp", raftAddrMap[nodeId])
 	if err != nil {
 		slog.Error("could not start raft listener", "err", err)
