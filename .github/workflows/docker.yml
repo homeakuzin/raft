@@ -1,18 +1,38 @@
 name: Raft
 
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    push:
+        branches: ["master"]
+
+env:
+    REGISTRY: registry.akuzin.tech
+    IMAGE_NAME: raft
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Test
-      run: |
-        IMAGE=raft-test:$(date +%s)
-        docker build . --target=test -t $IMAGE
-        docker run --rm $IMAGE
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Test
+              run: |
+                  IMAGE=raft-test:test
+                  docker build . --target=test -t $IMAGE
+                  docker run --rm $IMAGE
+
+    build-and-push:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Log in to registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ secrets.REGISTRY_USERNAME }}
+                  password: ${{ secrets.REGISTRY_PASSWORD }}
+
+            - name: Build and push
+              run: |
+                  image="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}"
+                  docker build -t "$image" .
+                  docker push "$image"
