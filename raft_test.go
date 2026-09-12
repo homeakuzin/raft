@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 
 func TestLeaderIsElected(t *testing.T) {
 	t.Parallel()
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 	snapshot := cluster.waitHealthy()
 	for _, followerID := range snapshot.followerIDs {
@@ -63,7 +63,7 @@ func TestLeaderIsElected(t *testing.T) {
 
 func TestLeaderReplicatesClientCommands(t *testing.T) {
 	t.Parallel()
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 	cluster.waitHealthy()
 	leader := cluster.leader()
@@ -91,7 +91,7 @@ func TestLeaderReplicatesClientCommands(t *testing.T) {
 
 func TestNodeRecoversStateAfterFailure(t *testing.T) {
 	t.Parallel()
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 	clusterSnapshot := cluster.waitHealthy()
 
@@ -125,7 +125,7 @@ func TestNodeRecoversStateAfterFailure(t *testing.T) {
 func TestNewLeaderIsElectedWhenInitialIsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
@@ -150,7 +150,7 @@ func TestNewLeaderIsElectedWhenInitialIsUnavailable(t *testing.T) {
 func TestFollowerPartitionDoesNotBreakMajorityLeader(t *testing.T) {
 	t.Parallel()
 
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
@@ -176,7 +176,7 @@ func TestFollowerPartitionDoesNotBreakMajorityLeader(t *testing.T) {
 func TestHighLatencyFollowerRecovers(t *testing.T) {
 	t.Parallel()
 
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
@@ -198,7 +198,7 @@ func TestHighLatencyFollowerRecovers(t *testing.T) {
 func TestClientCommandBlocksAndNodCommitedUntilReplicated(t *testing.T) {
 	t.Parallel()
 
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
@@ -224,7 +224,7 @@ func TestClientCommandBlocksAndNodCommitedUntilReplicated(t *testing.T) {
 func TestClusterDiscardsCorruptedEntries(t *testing.T) {
 	t.Parallel()
 
-	cluster := newHTTPNetworkTestCluster(t)
+	cluster := newTestCluster(t)
 	cluster.Run(t.Context())
 
 	initial := cluster.waitHealthy()
@@ -300,9 +300,8 @@ type networkTestCluster struct {
 	conditions *networkConditions
 }
 
-func newHTTPNetworkTestCluster(t testing.TB) *networkTestCluster {
+func newTestClusterWithLoggerFactory(t testing.TB, loggerFactory func(t testing.TB, id NodeId) *RaftLogger) *networkTestCluster {
 	t.Helper()
-
 	listeners := map[NodeId]net.Listener{}
 	addrs := map[NodeId]string{}
 	for _, id := range []NodeId{Node1, Node2, Node3} {
@@ -316,7 +315,7 @@ func newHTTPNetworkTestCluster(t testing.TB) *networkTestCluster {
 	conditions := newNetworkConditions(t)
 	nodes := make([]*Node, 0, len(listeners))
 	for _, id := range []NodeId{Node1, Node2, Node3} {
-		nodeLogger := logger(t, id)
+		nodeLogger := loggerFactory(t, id)
 		base := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
 		node := NewNode(id, peersFor(id), nodeLogger, withNetworkConditions(id, base, conditions)).
 			SetTimeouts(testingTimeouts)
@@ -328,6 +327,11 @@ func newHTTPNetworkTestCluster(t testing.TB) *networkTestCluster {
 		cluster.Shutdown(t.Context())
 	})
 	return cluster
+}
+
+func newTestCluster(t testing.TB) *networkTestCluster {
+	t.Helper()
+	return newTestClusterWithLoggerFactory(t, logger)
 }
 
 func (c *networkTestCluster) Run(ctx context.Context) {
@@ -381,7 +385,6 @@ func (c *networkTestCluster) waitHealthy() clusterSnapshot {
 		snapshot := snapshotNodes(c.nodes)
 		stateMap = statesByState(snapshot.states)
 		if snapshot.leaderID != None && len(snapshot.followerIDs) == len(c.nodes)-1 && allTermsEqual(snapshot) {
-			c.t.Logf("cluster is healthy: %+v", stateMap)
 			return snapshot
 		}
 		time.Sleep(pollInterval)
