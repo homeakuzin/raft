@@ -13,4 +13,6 @@ jobs:
     - uses: actions/checkout@v4
     - name: Test
       run: |
-        - docker build . --target=test --t raft-test:$(date +%s)
+        IMAGE=raft-test:$(date +%s)
+        docker build . --target=test -t $IMAGE
+        docker run --rm $IMAGE

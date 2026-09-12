@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"log/slog"
+	"math/rand"
 	"testing"
 
 	main "github.com/homeakuzin/raft"
@@ -15,7 +16,34 @@ func BenchmarkCommandsToHealthyCluster(b *testing.B) {
 	cluster.Run(b.Context())
 	cluster.waitHealthy()
 	leader := cluster.leader()
-	for b.Loop() {
-		require.NoError(b, leader.ClientCommand(b.Context(), []byte{'l', 'o', 'g'}))
+
+	n := 1024 * 1024
+	commands := make([][]byte, b.N)
+	for i := 0; i < b.N; i++ {
+		commands[i] = command(n)
+		require.NoError(b, leader.ClientCommand(b.Context(), commands[i]))
 	}
+
+	logs := leader.StateMachine().Logs()
+	for i := range commands {
+		require.Equal(b, commands[i], logs[i].Data)
+	}
+}
+
+func command(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		for {
+			var one [1]byte
+			if _, err := rand.Read(one[:]); err != nil {
+				panic(err)
+			}
+			if one[0] < 190 {
+				b[i] = 32 + one[0]%95
+				break
+			}
+		}
+	}
+
+	return b
 }
