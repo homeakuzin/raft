@@ -64,3 +64,39 @@ jobs:
                     docker compose ps raft
                     "
                 done
+                
+    restart:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Configure SSH
+              run: |
+                install -d -m 700 ~/.ssh
+                printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+                chmod 600 ~/.ssh/id_ed25519
+                printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+            
+            - name: Stop
+              run: |
+                set -eu
+        
+                for host in ${DEPLOY_HOSTS}; do
+                    ssh "github@${host}" "
+                    set -eu
+                    cd /opt/raft
+                    docker compose stop
+                    "
+                done
+                
+            - name: Start
+              run: |
+                set -eu
+        
+                for host in ${DEPLOY_HOSTS}; do
+                    ssh "github@${host}" "
+                    set -eu
+                    cd /opt/raft
+                    docker compose pull raft
+                    docker compose up -d --no-deps --force-recreate
+                    docker compose ps raft
+                    "
+                done
