@@ -132,15 +132,15 @@ func parseAndValidateAddrs(envName string, nodeId NodeId) map[NodeId]string {
 	}
 	result, err := parseAddrsFlag(value)
 	if err != nil {
-		slog.Error("invalid addrs value", "err", err, "name", envName)
+		slog.Error("invalid addrs value", "value", value, "err", err, "name", envName)
 		os.Exit(1)
 	}
 	if len(result) != 3 {
-		slog.Error("invalid addrs value", "err", "expected exactly 3 nodes", "actual", len(result), "name", envName)
+		slog.Error("invalid addrs value", "value", value, "err", "expected exactly 3 nodes", "actual", len(result), "name", envName)
 		os.Exit(1)
 	}
 	if _, ok := result[nodeId]; !ok {
-		slog.Error("invalid addrs value", "err", "addr not provided for current node")
+		slog.Error("invalid addrs value", "value", value, "err", "addr not provided for current node")
 		os.Exit(1)
 	}
 	return result
