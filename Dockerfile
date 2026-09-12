@@ -1,10 +1,15 @@
-FROM golang:1.26 AS test
+FROM golang:1.26 AS base
+COPY go.mod go.sum .
+RUN go mod download
 COPY . .
+
+FROM base AS test
 RUN CGO_ENABLED=1 go test . -c -race -o /raft.test
-CMD ["/raft.test", "-test.v"]
+ENTRYPOINT ["/raft.test", "-test.v"]
 
-FROM golang:1.26-alpine AS main
-COPY . .
-RUN go build -o /raft .
+FROM base AS build
+RUN CGO_ENABLED=0 go build -o /raft .
+
+FROM scratch AS main
+COPY --from=build /raft /raft
 ENTRYPOINT ["/raft"]
-
