@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+
+	"github.com/VictoriaMetrics/metrics"
 )
 
 const clientAddrsFlag = "clientaddrs"
@@ -36,6 +39,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	prometheusAddr := os.Getenv("PROMETHEUS_METRICS_ADDR")
+	if prometheusAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+				metrics.WritePrometheus(w, true)
+			})
+			slog.Info("metrics server listening", "addr", prometheusAddr)
+			err := http.ListenAndServe(prometheusAddr, mux)
+			if err != nil {
+				slog.Error("metrics server error", "err", err)
+				return
+			}
+		}()
+	}
+
 	ln, err := net.Listen("tcp", raftAddrMap[nodeId])
 	if err != nil {
 		slog.Error("could not start raft listener", "err", err)
@@ -44,6 +63,15 @@ func main() {
 	raftLogger := NewRaftLogger(slog.Default())
 	tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
 	node := NewNode(nodeId, otherIds(raftAddrMap, nodeId), raftLogger, tr)
+	metrics.GetOrCreateGauge("raft_state", func() float64 {
+		return node.State().Float64()
+	})
+	metrics.GetOrCreateGauge("raft_term", func() float64 {
+		return float64(node.CurrentTerm())
+	})
+	metrics.GetOrCreateGauge("raft_commit_index", func() float64 {
+		return float64(node.CommitIndex())
+	})
 	node.Run(ctx)
 }
 

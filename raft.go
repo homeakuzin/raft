@@ -37,6 +37,18 @@ const (
 	Leader    State = "leader"
 )
 
+func (s State) Float64() float64 {
+	if s == Follower {
+		return 0
+	} else if s == Candidate {
+		return 1
+	} else if s == Leader {
+		return 2
+	} else {
+		return -1
+	}
+}
+
 type NodeTimeouts struct {
 	Election  time.Duration
 	Heartbeat time.Duration
