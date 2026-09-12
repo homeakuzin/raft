@@ -60,7 +60,7 @@ jobs:
                     set -eu
                     cd /opt/raft
                     docker compose pull raft
-                    docker compose up -d --no-deps --force-recreate raft
+                    docker compose up -d --no-deps --force-recreate
                     docker compose ps raft
                     "
                 done
