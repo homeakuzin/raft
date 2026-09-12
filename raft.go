@@ -501,7 +501,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 }
 
 func (n *Node) resetElectionTimer() {
-	n.electionTimer.Reset(n.timeouts.Election + time.Duration(rand.Int63n(int64(n.timeouts.Election))*2))
+	n.electionTimer.Reset(n.timeouts.Election + time.Duration(rand.Int63n(int64(n.timeouts.Election))))
 }
 
 func (n *Node) resetHeartbeatTimer() {
@@ -581,6 +581,7 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 	}
 	ctx, n.electionSpan = Tracer.Start(ctx, "election", trace.WithAttributes(
 		attribute.String("node.id", n.Id().String()),
+		attribute.Int("node.term", n.currentTerm),
 	))
 
 	for _, peer := range n.peers {
@@ -589,7 +590,7 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 			attribute.String("node.id", n.Id().String()),
 			attribute.String("peer_id", peer.String()),
 		))
-		ctx, cancel := context.WithTimeout(ctx, n.timeouts.Election)
+		ctx, cancel := context.WithTimeout(ctx, n.timeouts.Election*2)
 		go func() {
 			defer cancel()
 			reply, err := n.transport.RequestVote(ctx, peer, args)
