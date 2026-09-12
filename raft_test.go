@@ -431,7 +431,7 @@ func peersFor(id NodeId) []NodeId {
 	case Node3:
 		return []NodeId{Node1, Node2}
 	default:
-		panic(fmt.Sprintf("unknown node id %d", id))
+		panic(fmt.Sprintf("unknown node id %s", id))
 	}
 }
 
@@ -509,6 +509,6 @@ func logger(t testing.TB, nodeID NodeId) *RaftLogger {
 	return NewRaftLogger(slog.New(slog.NewTextHandler(coloredLogWriter{
 		t:      t,
 		color:  nodeLogColors[nodeID],
-		prefix: fmt.Sprintf("[Node%d]", nodeID),
+		prefix: fmt.Sprintf("[%s]", nodeID),
 	}, &slog.HandlerOptions{Level: level}))).DebugLevel(*flagDebugLevel)
 }

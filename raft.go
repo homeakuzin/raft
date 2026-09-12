@@ -11,23 +11,22 @@ import (
 	"net"
 	"net/http"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type NodeId int
+type NodeId string
 
 const (
-	None NodeId = iota
-	Node1
-	Node2
-	Node3
+	None  NodeId = ""
+	Node1        = "1"
+	Node2        = "2"
+	Node3        = "3"
 )
 
 func (id NodeId) String() string {
-	return "Node" + strconv.Itoa(int(id))
+	return "Node" + string(id)
 }
 
 type State string
@@ -298,7 +297,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	defer n.transport.Shutdown(ctx)
 
-	n.votedFor = -1
+	n.votedFor = None
 	n.state = Follower
 	n.heartbeatTimer = time.NewTimer(0)
 	n.heartbeatTimer.Stop()
@@ -331,7 +330,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 	case reply := <-n.appendEntriesReplyCh:
 		n.logger.dlog2("handle AppendEntries reply", "peer", reply.Peer, "reply", reply, "next_index", n.nextIndex)
 		if reply.Term > n.currentTerm {
-			n.becomeFollower(reply.Term)
+			n.becomeFollower(reply.Term, reply.Peer)
 			return
 		}
 		if reply.Success {
@@ -393,7 +392,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			return
 		}
 		reply.Success = true
-		n.becomeFollower(appendEntries.args.Term)
+		n.becomeFollower(appendEntries.args.Term, appendEntries.args.LeaderId)
 
 		if n.logStorage.len() >= appendEntries.args.PrevLogIndex {
 			if appendEntries.args.PrevLogIndex > 0 {
@@ -434,14 +433,16 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		}
 
 	case <-n.electionTimer.C:
-		n.logger.dlog("start election", "new_term", n.currentTerm+1)
+		if n.state != Candidate {
+			n.logger.Info("start election", "new_term", n.currentTerm+1)
+		}
 		n.startElection(ctx, n.requestVoteReplyCh)
 		n.resetElectionTimer()
 		n.heartbeatTimer.Stop()
 	case reply := <-n.requestVoteReplyCh:
 		n.logger.dlog2("handle RequestVote reply", "peer", reply.Peer, "reply", reply)
 		if reply.Term > n.currentTerm {
-			n.becomeFollower(reply.Term)
+			n.becomeFollower(reply.Term, reply.Peer)
 			return
 		}
 		if reply.VoteGranted && n.state == Candidate {
@@ -453,7 +454,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 				}
 			}
 			if votes*2 > len(n.peers)+1 {
-				n.logger.dlog("become leader")
+				n.logger.Info("become leader")
 				n.state = Leader
 				for _, id := range n.peers {
 					n.nextIndex[id] = n.logStorage.len() + 1
@@ -467,8 +468,8 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		n.logger.dlog2("handle RequestVote call", "peer", requestVote.args.CandidateId, "args", requestVote.args)
 		var reply RequestVoteReply
 		reply.VoteGranted = false
-		if requestVote.args.Term > n.currentTerm || requestVote.args.Term == n.currentTerm && (n.votedFor == -1 || n.votedFor == requestVote.args.CandidateId) {
-			n.becomeFollower(requestVote.args.Term)
+		if requestVote.args.Term > n.currentTerm || requestVote.args.Term == n.currentTerm && (n.votedFor == None || n.votedFor == requestVote.args.CandidateId) {
+			n.becomeFollower(requestVote.args.Term, requestVote.args.CandidateId)
 			n.votedFor = requestVote.args.CandidateId
 			reply.VoteGranted = true
 		}
@@ -487,9 +488,9 @@ func (n *Node) resetHeartbeatTimer() {
 	n.heartbeatTimer.Reset(n.timeouts.Heartbeat)
 }
 
-func (n *Node) becomeFollower(term int) {
-	if n.state != Follower {
-		n.logger.dlog("become follower", "term", term)
+func (n *Node) becomeFollower(term int, leaderId NodeId) {
+	if n.state != Follower || n.currentTerm == 0 {
+		n.logger.Info("become follower", "term", term, "leader", leaderId.String())
 	}
 	n.state = Follower
 	n.currentTerm = term
@@ -557,6 +558,7 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 
 type SlogLogger interface {
 	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
 	InfoContext(ctx context.Context, msg string, args ...any)
 	ErrorContext(ctx context.Context, msg string, args ...any)
 }

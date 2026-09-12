@@ -6,7 +6,6 @@ on:
 
 env:
     REGISTRY: registry.akuzin.tech
-    IMAGE_NAME: raft
 
 jobs:
     test:
@@ -34,6 +33,6 @@ jobs:
 
             - name: Build and push
               run: |
-                  image="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}"
+                  image="${REGISTRY}/raft:latest"
                   docker build -t "$image" .
                   docker push "$image"

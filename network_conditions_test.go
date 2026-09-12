@@ -41,7 +41,7 @@ func (n *networkConditions) Cut(from, to NodeId) {
 	n.cutLinks[link{from: to, to: from}] = true
 	n.mu.Unlock()
 
-	n.logf("network conditions: cut link %d <-> %d", from, to)
+	n.logf("network conditions: cut link %s <-> %s", from, to)
 }
 
 func (n *networkConditions) Heal(from, to NodeId) {
@@ -50,7 +50,7 @@ func (n *networkConditions) Heal(from, to NodeId) {
 	delete(n.cutLinks, link{from: to, to: from})
 	n.mu.Unlock()
 
-	n.logf("network conditions: heal link %d <-> %d", from, to)
+	n.logf("network conditions: heal link %s <-> %s", from, to)
 }
 
 func (n *networkConditions) Latency(from, to NodeId, d time.Duration) {
@@ -59,7 +59,7 @@ func (n *networkConditions) Latency(from, to NodeId, d time.Duration) {
 	n.latency[link{from: to, to: from}] = d
 	n.mu.Unlock()
 
-	n.logf("network conditions: set latency %s on link %d <-> %d", d, from, to)
+	n.logf("network conditions: set latency %s on link %s <-> %s", d, from, to)
 }
 
 func (n *networkConditions) ClearLatency(from, to NodeId) {
@@ -68,7 +68,7 @@ func (n *networkConditions) ClearLatency(from, to NodeId) {
 	delete(n.latency, link{from: to, to: from})
 	n.mu.Unlock()
 
-	n.logf("network conditions: clear latency on link %d <-> %d", from, to)
+	n.logf("network conditions: clear latency on link %s <-> %s", from, to)
 }
 
 func (n *networkConditions) beforeSend(ctx context.Context, from, to NodeId) error {
@@ -96,7 +96,7 @@ func (n *networkConditions) checkCut(from, to NodeId) error {
 	cut := n.cutLinks[link{from: from, to: to}]
 	n.mu.Unlock()
 	if cut {
-		return fmt.Errorf("network link cut: %d -> %d", from, to)
+		return fmt.Errorf("network link cut: %s -> %s", from, to)
 	}
 	return nil
 }
