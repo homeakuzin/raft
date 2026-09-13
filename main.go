@@ -27,8 +27,7 @@ func main() {
 	slog.SetDefault(slog.New(handler).With("node_id", nodeId))
 
 	raftAddrMap := parseAndValidateAddrs("RAFT_ADDRS", nodeId)
-	// clientAddrMap := parseAndValidateAddrs("RAFT_CLIENT_ADDRS", nodeId)
-	// _ = clientAddrMap
+	clientAddr := parseAndValidateAddrs("RAFT_CLIENT_ADDRS", nodeId)[nodeId]
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -94,6 +93,12 @@ func main() {
 		}()
 	}
 
+	clientLn, err := net.Listen("tcp", clientAddr)
+	if err != nil {
+		slog.Error("could not start client listener", "err", err)
+		os.Exit(1)
+	}
+
 	ln, err := net.Listen("tcp", raftAddrMap[nodeId])
 	if err != nil {
 		slog.Error("could not start raft listener", "err", err)
@@ -111,7 +116,39 @@ func main() {
 	metrics.GetOrCreateGauge("raft_commit_index", func() float64 {
 		return float64(node.CommitIndex())
 	})
+	startClientListener(clientLn, node)
+	slog.Info("client server listening", "addr", clientAddr)
 	node.Run(ctx)
+}
+
+const notALeaderResponse = "not a leader"
+
+func startClientListener(ln net.Listener, node *Node) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(node.State()))
+	})
+	mux.HandleFunc("/{data}", func(w http.ResponseWriter, r *http.Request) {
+		if node.State() != Leader {
+			w.WriteHeader(500)
+			w.Write([]byte(notALeaderResponse))
+			return
+		}
+		ctx, span := Tracer.Start(r.Context(), "Client Command")
+		data := r.PathValue("data")
+		err := node.ClientCommand(ctx, []byte(data))
+		if err != nil {
+			w.WriteHeader(500)
+			w.Write([]byte(err.Error()))
+			EndSpanWithError(span, err)
+			return
+		}
+		span.End()
+		w.Write([]byte("OK"))
+	})
+	server := &http.Server{Handler: mux}
+	go server.Serve(ln)
+	return server
 }
 
 func otherIds(addrs map[NodeId]string, nodeId NodeId) []NodeId {

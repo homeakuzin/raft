@@ -117,6 +117,7 @@ type Log struct {
 }
 
 type clientCommand struct {
+	ctx        context.Context
 	data       []byte
 	replicated chan error
 }
@@ -230,7 +231,7 @@ func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport)
 }
 
 func (n *Node) ClientCommand(ctx context.Context, command []byte) error {
-	c := clientCommand{command, make(chan error, 1)}
+	c := clientCommand{ctx, command, make(chan error, 1)}
 	defer close(c.replicated)
 	select {
 	case <-ctx.Done():
@@ -393,7 +394,7 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 		}
 		n.logStorage.append(log)
 		n.clientCommandIndexMap[log.Index] = clientCommand
-		n.sendAppendEntries(ctx)
+		n.sendAppendEntries(clientCommand.ctx)
 		n.resetHeartbeatTimer()
 
 	case appendEntries := <-n.appendEntriesRpcCh:
