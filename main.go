@@ -2,14 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 )
@@ -17,20 +24,46 @@ import (
 const clientAddrsFlag = "clientaddrs"
 const raftAddrsFlag = "raftaddrs"
 
+var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration")
+var flagBenchConcurrent = flag.Int("c", 1, "Concurrent clients")
+
 func main() {
-	nodeId := NodeId(os.Getenv("RAFT_NODE_ID"))
+	flag.Parse()
+	clientAddrMap := parseAndValidateAddrs("RAFT_CLIENT_ADDRS")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	logLevel := slog.LevelInfo
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	})
+	slog.SetDefault(slog.New(handler))
+
+	if *flagBenchDuration > 0 {
+		err := runBenchmarks(ctx, clientAddrMap)
+		if err != nil {
+			slog.Error("benchmark error", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+
+	nodeId := NodeId(os.Getenv("RAFT_NODE_ID"))
+
 	slog.SetDefault(slog.New(handler).With("node_id", nodeId))
 
-	raftAddrMap := parseAndValidateAddrs("RAFT_ADDRS", nodeId)
-	clientAddr := parseAndValidateAddrs("RAFT_CLIENT_ADDRS", nodeId)[nodeId]
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	raftAddrMap := parseAndValidateAddrs("RAFT_ADDRS")
+	if _, ok := raftAddrMap[nodeId]; !ok {
+		slog.Error("invalid addrs value", "err", "addr not provided for current node")
+		os.Exit(1)
+	}
+	var clientAddr string
+	var ok bool
+	if clientAddr, ok = clientAddrMap[nodeId]; !ok {
+		slog.Error("invalid addrs value", "err", "addr not provided for current node")
+		os.Exit(1)
+	}
 
 	prometheusAddr := os.Getenv("PROMETHEUS_METRICS_ADDR")
 	if prometheusAddr != "" {
@@ -105,6 +138,18 @@ func main() {
 		os.Exit(1)
 	}
 	raftLogger := NewRaftLogger(slog.Default())
+	debugLevel := os.Getenv("RAFT_DEBUG")
+	switch debugLevel {
+	case "1":
+		raftLogger.DebugLevel(1)
+	case "2":
+		raftLogger.DebugLevel(2)
+	case "3":
+		raftLogger.DebugLevel(3)
+	}
+	if debugLevel != "" {
+		slog.Info("debug level", "level", debugLevel)
+	}
 	tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
 	node := NewNode(nodeId, otherIds(raftAddrMap, nodeId), raftLogger, tr)
 	metrics.GetOrCreateGauge("raft_state", func() float64 {
@@ -119,6 +164,133 @@ func main() {
 	startClientListener(clientLn, node)
 	slog.Info("client server listening", "addr", clientAddr)
 	node.Run(ctx)
+}
+
+func runBenchmarks(ctx context.Context, clientAddrMap map[NodeId]string) error {
+	ctx, cancel := context.WithTimeout(ctx, *flagBenchDuration)
+	defer cancel()
+	clientsSemaphore := make(chan struct{}, *flagBenchConcurrent)
+	leader, err := discoverLeader(ctx, clientAddrMap)
+	if err != nil {
+		return fmt.Errorf("could not discover leader: %w", err)
+	}
+	resultMu := &sync.Mutex{}
+	counter := 0
+	latency := make([]time.Duration, 0, *flagBenchConcurrent)
+	benchmarkStart := time.Now()
+	// leaderMu := &sync.Mutex{}
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+		case clientsSemaphore <- struct{}{}:
+		}
+
+		go func() {
+			defer func() { <-clientsSemaphore }()
+			data := command(16)
+			req, err := http.NewRequestWithContext(ctx, "GET", "http://"+clientAddrMap[leader]+"/"+string(data), nil)
+			if err != nil {
+				slog.Error("client error", "err", err)
+				cancel()
+				return
+			}
+			start := time.Now()
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				slog.Error("client error", "err", err)
+				cancel()
+				return
+			}
+			defer resp.Body.Close()
+			resultMu.Lock()
+			counter++
+			latency = append(latency, time.Since(start))
+			resultMu.Unlock()
+		}()
+	}
+	slices.Sort(latency)
+	p50Idx := int(float64(len(latency)) * (50 / 100.0))
+	p90Idx := int(float64(len(latency)) * (90 / 100.0))
+	p99Idx := int(float64(len(latency)) * (99 / 100.0))
+	fmt.Printf("Total requests: %d\n", counter)
+	fmt.Printf("Concurrent clients: %d\n", *flagBenchConcurrent)
+	fmt.Printf("Time elapsed: %s\n", time.Since(benchmarkStart).String())
+	fmt.Printf("Latency:\n")
+	fmt.Printf("\tp50: %s (%d)\n", latency[p50Idx].String(), p50Idx)
+	fmt.Printf("\tp90: %s (%d)\n", latency[p90Idx].String(), p90Idx)
+	fmt.Printf("\tp99: %s (%d)\n", latency[p99Idx].String(), p99Idx)
+	return nil
+}
+
+func command(n int) []byte {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	b := make([]byte, n)
+	for i := range b {
+		for {
+			var one [1]byte
+			if _, err := rand.Read(one[:]); err != nil {
+				panic(err)
+			}
+
+			if one[0] < 248 { // 62 * 4: без смещения распределения
+				b[i] = alphabet[int(one[0])%len(alphabet)]
+				break
+			}
+		}
+	}
+
+	return b
+}
+
+type nodeState struct {
+	id    NodeId
+	state State
+	err   error
+}
+
+func discoverLeader(ctx context.Context, clientAddrMap map[NodeId]string) (NodeId, error) {
+	leaderDiscoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for attempt := 0; attempt < 5; attempt++ {
+		wg := &sync.WaitGroup{}
+		states := make(chan nodeState, len(clientAddrMap))
+		for id, addr := range clientAddrMap {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, _ := http.NewRequestWithContext(leaderDiscoveryCtx, "GET", "http://"+addr, nil)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					states <- nodeState{err: fmt.Errorf("%s: %w", id.String(), err)}
+					return
+				}
+				defer resp.Body.Close()
+				state, err := io.ReadAll(resp.Body)
+				if err != nil {
+					states <- nodeState{err: fmt.Errorf("%s: %w", id.String(), err)}
+					return
+				}
+				states <- nodeState{id: id, state: State(state)}
+			}()
+		}
+
+		wg.Wait()
+		close(states)
+		for ns := range states {
+			if ns.err != nil {
+				return None, ns.err
+			}
+			if ns.state == Leader {
+				return ns.id, nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return None, errors.New("leader has not been chosen for way too long")
 }
 
 const notALeaderResponse = "not a leader"
@@ -161,7 +333,7 @@ func otherIds(addrs map[NodeId]string, nodeId NodeId) []NodeId {
 	return ids
 }
 
-func parseAndValidateAddrs(envName string, nodeId NodeId) map[NodeId]string {
+func parseAndValidateAddrs(envName string) map[NodeId]string {
 	value := os.Getenv(envName)
 	if value == "" {
 		slog.Error("addrs required", "name", envName)
@@ -174,10 +346,6 @@ func parseAndValidateAddrs(envName string, nodeId NodeId) map[NodeId]string {
 	}
 	if len(result) != 3 {
 		slog.Error("invalid addrs value", "value", value, "err", "expected exactly 3 nodes", "actual", len(result), "name", envName)
-		os.Exit(1)
-	}
-	if _, ok := result[nodeId]; !ok {
-		slog.Error("invalid addrs value", "value", value, "err", "addr not provided for current node")
 		os.Exit(1)
 	}
 	return result

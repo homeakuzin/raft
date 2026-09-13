@@ -263,6 +263,13 @@ func TestClusterDiscardsCorruptedEntries(t *testing.T) {
 	require.Equal(t, cmd3, initialLeader.StateMachine().Logs()[0].Data)
 }
 
+func TestNodeMayJoinEstablishedIncompleteCluster(t *testing.T) {
+	// TODO
+	// cluster with 2 nodes is established
+	// third node joins
+	// now it fails at "update commit index" step
+}
+
 // TODO *Node instead of NodeId
 type clusterSnapshot struct {
 	leaderID    NodeId
