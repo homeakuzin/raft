@@ -43,7 +43,7 @@ func main() {
 	if *flagBenchDuration > 0 {
 		err := runBenchmarks(ctx, clientAddrMap)
 		if err != nil {
-			slog.Error("benchmark error", err.Error())
+			slog.Error("benchmark error", "err", err.Error())
 			os.Exit(1)
 		}
 		return

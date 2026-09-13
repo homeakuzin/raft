@@ -267,7 +267,44 @@ func TestNodeMayJoinEstablishedIncompleteCluster(t *testing.T) {
 	// TODO
 	// cluster with 2 nodes is established
 	// third node joins
-	// now it fails at "update commit index" step
+	// for now it fails at "update commit index" step
+}
+
+func TestConcurrentClientCommands(t *testing.T) {
+	t.Parallel()
+	cluster := newTestCluster(t)
+	cluster.Run(t.Context())
+	cluster.waitHealthy()
+	leader := cluster.leader()
+
+	n := 50
+	commands := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		commands[i] = generateCommand(2)
+	}
+	wg := &sync.WaitGroup{}
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- leader.ClientCommand(t.Context(), commands[i])
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	logs := leader.StateMachine().Logs()
+	require.Len(t, logs, n)
+	logsBody := make([][]byte, len(logs))
+	for i := range logs {
+		logsBody[i] = logs[i].Data
+	}
+	for _, cmd := range commands {
+		require.Contains(t, logsBody, cmd)
+	}
 }
 
 // TODO *Node instead of NodeId

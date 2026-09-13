@@ -20,7 +20,7 @@ func BenchmarkCommandsToHealthyCluster(b *testing.B) {
 	n := 1024
 	commands := make([][]byte, b.N)
 	for i := 0; i < b.N; i++ {
-		commands[i] = command(n)
+		commands[i] = generateCommand(n)
 		require.NoError(b, leader.ClientCommand(b.Context(), commands[i]))
 	}
 
@@ -30,7 +30,7 @@ func BenchmarkCommandsToHealthyCluster(b *testing.B) {
 	}
 }
 
-func command(n int) []byte {
+func generateCommand(n int) []byte {
 	b := make([]byte, n)
 	for i := range b {
 		for {

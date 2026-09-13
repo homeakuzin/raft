@@ -373,9 +373,10 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 					n.stateMachine.apply(newLogs...)
 					n.commitIndex = quorumMatchIndex
 					for i := oldIndex; i <= quorumMatchIndex; i++ {
-						if clientCommand, isClientPending := n.clientCommandIndexMap[i+1]; isClientPending {
+						if clientCommand, isClientPending := n.clientCommandIndexMap[i]; isClientPending {
 							n.logger.dlog3("respond to client", "log_index", i)
 							clientCommand.replicated <- nil
+							delete(n.clientCommandIndexMap, i)
 						}
 					}
 				}
