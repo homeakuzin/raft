@@ -381,6 +381,10 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 					}
 				}
 			}
+		} else {
+			if n.nextIndex[reply.Peer] > 1 {
+				n.nextIndex[reply.Peer]--
+			}
 		}
 	case clientCommand := <-n.clientCommandCh:
 		n.logger.dlog2("handle client command")
@@ -423,6 +427,10 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 					return
 				}
 			}
+		} else {
+			n.logger.dlog3("we have less logs than leader thinks", "args", appendEntries.args, "log_storage_len", n.logStorage.len())
+			reply.Success = false
+			return
 		}
 
 		if len(appendEntries.args.Entries) > 0 {
@@ -444,9 +452,9 @@ func (n *Node) eventLoop(ctx context.Context) (stop bool) {
 			n.logger.dlog3("append log entries", "args", appendEntries.args, "logs_count", n.logStorage.len())
 		}
 
-		if appendEntries.args.LeaderCommit > n.commitIndex {
+		if appendEntries.args.LeaderCommit > n.commitIndex && appendEntries.args.LeaderCommit <= n.logStorage.len() {
+			n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", appendEntries.args.LeaderCommit, "log_storage", n.logStorage)
 			newLogs := n.logStorage.slice(n.commitIndex+1, appendEntries.args.LeaderCommit+1)
-			n.logger.dlog("update commit index", "old_commit_index", n.commitIndex, "newCommitIndex", appendEntries.args.LeaderCommit, "new_logs_count", len(newLogs))
 			n.stateMachine.apply(newLogs...)
 			n.commitIndex = appendEntries.args.LeaderCommit
 		}
@@ -647,27 +655,37 @@ func (l *RaftLogger) dlog3(msg string, args ...any) {
 }
 
 type HttpPeerTransport struct {
-	ln     net.Listener
-	nodeId NodeId
-	peers  map[NodeId]string
-	server *http.Server
-	logger *RaftLogger
+	ln      net.Listener
+	nodeId  NodeId
+	peers   map[NodeId]string
+	server  *http.Server
+	logger  *RaftLogger
+	handler *httpHandler
 }
 
 func NewHttpTransport(ln net.Listener, nodeId NodeId, peers map[NodeId]string, logger *RaftLogger) *HttpPeerTransport {
-	return &HttpPeerTransport{ln: ln, nodeId: nodeId, peers: peers, logger: logger}
+	handler := &httpHandler{}
+	return &HttpPeerTransport{
+		ln:      ln,
+		nodeId:  nodeId,
+		peers:   peers,
+		logger:  logger,
+		server:  &http.Server{Addr: ln.Addr().String(), Handler: handler},
+		handler: handler,
+	}
 }
 
 func (t *HttpPeerTransport) Serve(ctx context.Context, requestVoteCallback func(args RequestVoteArgs, replyCh chan<- RequestVoteReply), appendEntriesCallback func(args AppendEntriesArgs, replyCh chan<- AppendEntriesReply)) error {
-	t.server = &http.Server{Addr: t.ln.Addr().String(), Handler: httpHandler{requestVoteCallback, appendEntriesCallback, t.logger}}
+	t.handler.requestVoteCallback = requestVoteCallback
+	t.handler.appendEntriesCallback = appendEntriesCallback
+	t.handler.logger = t.logger
+	t.logger.InfoContext(ctx, "starting http transport", "addr", t.ln.Addr())
 	go t.server.Serve(t.ln)
 	return nil
 }
 
 func (t *HttpPeerTransport) Shutdown(ctx context.Context) {
-	if t.server != nil {
-		t.server.Close()
-	}
+	t.server.Close()
 }
 
 type httpHandler struct {
@@ -685,6 +703,7 @@ func (h httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(500)
 		h.logger.ErrorContext(r.Context(), "could not read request body", "error", err)
+		return
 	}
 
 	if r.RequestURI == "/request-vote" {

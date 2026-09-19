@@ -50,6 +50,10 @@ func main() {
 	}
 
 	nodeId := NodeId(os.Getenv("RAFT_NODE_ID"))
+	if nodeId == None {
+		slog.Error("expected RAFT_NODE_ID")
+		os.Exit(1)
+	}
 
 	slog.SetDefault(slog.New(handler).With("node_id", nodeId))
 
@@ -282,7 +286,7 @@ func discoverLeader(ctx context.Context, clientAddrMap map[NodeId]string) (NodeI
 		close(states)
 		for ns := range states {
 			if ns.err != nil {
-				return None, ns.err
+				slog.Error("node GET state error", "err", ns.err)
 			}
 			if ns.state == Leader {
 				return ns.id, nil

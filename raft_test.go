@@ -264,10 +264,73 @@ func TestClusterDiscardsCorruptedEntries(t *testing.T) {
 }
 
 func TestNodeMayJoinEstablishedIncompleteCluster(t *testing.T) {
-	// TODO
-	// cluster with 2 nodes is established
-	// third node joins
-	// for now it fails at "update commit index" step
+	t.Parallel()
+	cluster := newTestCluster(t)
+	cluster.runNodes(t.Context(), []NodeId{Node1, Node2})
+	waitLeaderAmong(t, cluster.nodesByID(Node1, Node2))
+	leader := cluster.leader()
+	cmd1 := []byte{'r', 'a'}
+	cmd2 := []byte{'f', 't'}
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd1))
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd2))
+	go cluster.nodesByID(Node3)[0].Run(t.Context())
+	cluster.waitHealthy()
+}
+
+func TestNodeJoinsAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	listeners := map[NodeId]net.Listener{}
+	addrs := map[NodeId]string{}
+	for _, id := range []NodeId{Node1, Node2, Node3} {
+		ln, err := net.Listen("tcp", "0.0.0.0:0")
+		require.NoError(t, err)
+
+		listeners[id] = ln
+		addrs[id] = ln.Addr().String()
+	}
+
+	nodes := make([]*Node, 0, len(listeners))
+	for _, id := range []NodeId{Node1, Node2, Node3} {
+		nodeLogger := logger(t, id)
+		transport := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
+		node := NewNode(id, peersFor(id), nodeLogger, transport).
+			SetTimeouts(testingTimeouts)
+		nodes = append(nodes, node)
+	}
+
+	cluster := &networkTestCluster{t: t, nodes: nodes}
+	t.Cleanup(func() {
+		cluster.Shutdown(t.Context())
+	})
+	cluster.Run(t.Context())
+	snapshot := cluster.waitHealthy()
+	leader := cluster.leader()
+	cmd1 := []byte{'r', 'a'}
+	cmd2 := []byte{'f', 't'}
+	cmd3 := []byte{'j', 's'}
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd1))
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd2))
+	cluster.waitNodesHaveCommitIndex(2, cluster.nodes)
+
+	restartId := snapshot.followerIDs[0]
+	t.Logf("shutdown %s", restartId)
+	cluster.nodesByID(restartId)[0].Shutdown(t.Context())
+	require.NoError(t, leader.ClientCommand(t.Context(), cmd3))
+
+	nodeLogger := logger(t, restartId)
+	ln, err := net.Listen("tcp", addrs[restartId])
+	require.NoError(t, err)
+	transport := NewHttpTransport(ln, restartId, addrs, nodeLogger)
+	restartNode := NewNode(restartId, peersFor(restartId), nodeLogger, transport).
+		SetTimeouts(testingTimeouts)
+	go restartNode.Run(t.Context())
+	for i, n := range cluster.nodes {
+		if n.Id() == restartId {
+			cluster.nodes[i] = restartNode
+		}
+	}
+	cluster.waitNodesHaveCommitIndex(3, cluster.nodes)
 }
 
 func TestConcurrentClientCommands(t *testing.T) {
@@ -360,8 +423,8 @@ func newTestClusterWithLoggerFactory(t testing.TB, loggerFactory func(t testing.
 	nodes := make([]*Node, 0, len(listeners))
 	for _, id := range []NodeId{Node1, Node2, Node3} {
 		nodeLogger := loggerFactory(t, id)
-		base := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
-		node := NewNode(id, peersFor(id), nodeLogger, withNetworkConditions(id, base, conditions)).
+		transport := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
+		node := NewNode(id, peersFor(id), nodeLogger, withNetworkConditions(id, transport, conditions)).
 			SetTimeouts(testingTimeouts)
 		nodes = append(nodes, node)
 	}
@@ -379,8 +442,17 @@ func newTestCluster(t testing.TB) *networkTestCluster {
 }
 
 func (c *networkTestCluster) Run(ctx context.Context) {
+	c.runNodes(ctx, []NodeId{Node1, Node2, Node3})
+}
+
+func (c *networkTestCluster) runNodes(ctx context.Context, ids []NodeId) {
 	for _, n := range c.nodes {
-		go n.Run(ctx)
+		for _, id := range ids {
+			if id == n.Id() {
+				go n.Run(ctx)
+				break
+			}
+		}
 	}
 }
 
@@ -396,6 +468,7 @@ func (c *networkTestCluster) leader() *Node {
 			return n
 		}
 	}
+	c.t.Log("no leader elected")
 	return nil
 }
 
