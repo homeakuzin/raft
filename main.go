@@ -13,6 +13,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ const raftAddrsFlag = "raftaddrs"
 
 var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration")
 var flagBenchConcurrent = flag.Int("c", 1, "Concurrent clients")
+var flagBenchmarkID = flag.String("benchmarkid", "", "Benchmark result directory name (defaults to date and time)")
 
 func main() {
 	flag.Parse()
@@ -41,7 +43,8 @@ func main() {
 	slog.SetDefault(slog.New(handler))
 
 	if *flagBenchDuration > 0 {
-		err := runBenchmarks(ctx, clientAddrMap)
+		debugAddrMap := parseAndValidateAddrs("RAFT_DEBUG_ADDRS")
+		err := runBenchmarks(ctx, clientAddrMap, debugAddrMap)
 		if err != nil {
 			slog.Error("benchmark error", "err", err.Error())
 			os.Exit(1)
@@ -102,7 +105,9 @@ func main() {
 	if pprofAddr != "" && pprofAuth != "" {
 		go func() {
 			var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("X-Auth-Token") != pprofAuth && r.URL.Query().Get("authToken") != pprofAuth {
+				_, password, basicAuthOK := r.BasicAuth()
+				validTokenAuth := r.Header.Get("X-Auth-Token") == pprofAuth || r.URL.Query().Get("authToken") == pprofAuth
+				if (!basicAuthOK || password != pprofAuth) && !validTokenAuth {
 					w.WriteHeader(401)
 					return
 				}
@@ -170,20 +175,33 @@ func main() {
 	node.Run(ctx)
 }
 
-func runBenchmarks(ctx context.Context, clientAddrMap map[NodeId]string) error {
-	fmt.Printf("Start benchmark testing %s\n", time.Now().Format(time.DateTime))
+func runBenchmarks(ctx context.Context, clientAddrMap, debugAddrMap map[NodeId]string) error {
+	benchmarkStart := time.Now()
+	resultDir, err := createBenchmarkResultDir(benchmarkStart)
+	if err != nil {
+		return fmt.Errorf("create benchmark result directory: %w", err)
+	}
+	fmt.Printf("Start benchmark testing %s\n", benchmarkStart.Format(time.DateTime))
 	ctx, cancel := context.WithTimeout(ctx, *flagBenchDuration)
 	defer cancel()
+	profilesDone := make(chan struct{})
+	go func() {
+		defer close(profilesDone)
+		collectProfiles(ctx, resultDir, debugAddrMap)
+	}()
+	defer func() {
+		cancel()
+		<-profilesDone
+	}()
 	clientsSemaphore := make(chan struct{}, *flagBenchConcurrent)
 	leader, err := discoverLeader(ctx, clientAddrMap)
 	if err != nil {
 		return fmt.Errorf("could not discover leader: %w", err)
 	}
 	resultMu := &sync.Mutex{}
+	requestsWg := &sync.WaitGroup{}
 	counter := 0
 	latency := make([]time.Duration, 0, *flagBenchConcurrent)
-	benchmarkStart := time.Now()
-	// leaderMu := &sync.Mutex{}
 loop:
 	for {
 		select {
@@ -192,7 +210,9 @@ loop:
 		case clientsSemaphore <- struct{}{}:
 		}
 
+		requestsWg.Add(1)
 		go func() {
+			defer requestsWg.Done()
 			defer func() { <-clientsSemaphore }()
 			data := command(16)
 			req, err := http.NewRequestWithContext(ctx, "GET", "http://"+clientAddrMap[leader]+"/"+string(data), nil)
@@ -204,6 +224,9 @@ loop:
 			start := time.Now()
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				slog.Error("client error", "err", err)
 				cancel()
 				return
@@ -215,18 +238,144 @@ loop:
 			resultMu.Unlock()
 		}()
 	}
+	requestsWg.Wait()
 	slices.Sort(latency)
-	p50Idx := int(float64(len(latency)) * (50 / 100.0))
-	p90Idx := int(float64(len(latency)) * (90 / 100.0))
-	p99Idx := int(float64(len(latency)) * (99 / 100.0))
+	if err := writeBenchmarkResult(resultDir, benchmarkStart, counter); err != nil {
+		return fmt.Errorf("write benchmark result: %w", err)
+	}
 	fmt.Printf("Total requests: %d\n", counter)
 	fmt.Printf("Concurrent clients: %d\n", *flagBenchConcurrent)
 	fmt.Printf("Time elapsed: %s\n", time.Since(benchmarkStart).String())
-	fmt.Printf("Latency:\n")
-	fmt.Printf("\tp50: %s\n", latency[p50Idx].String())
-	fmt.Printf("\tp90: %s\n", latency[p90Idx].String())
-	fmt.Printf("\tp99: %s\n", latency[p99Idx].String())
+	if len(latency) > 0 {
+		fmt.Printf("Latency:\n")
+		fmt.Printf("\tp50: %s\n", latency[percentileIndex(len(latency), 50)])
+		fmt.Printf("\tp90: %s\n", latency[percentileIndex(len(latency), 90)])
+		fmt.Printf("\tp99: %s\n", latency[percentileIndex(len(latency), 99)])
+	}
 	return nil
+}
+
+func createBenchmarkResultDir(start time.Time) (string, error) {
+	name := start.Format("2006-01-02_15-04-05")
+	if *flagBenchmarkID != "" {
+		name = *flagBenchmarkID
+		if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+			return "", errors.New("benchmarkid must be a directory name, not a path")
+		}
+	}
+	resultDir := filepath.Join("raft_benchmarks", name)
+	return resultDir, os.MkdirAll(resultDir, 0o755)
+}
+
+func writeBenchmarkResult(resultDir string, start time.Time, completedRequests int) error {
+	result := fmt.Sprintf(
+		"benchmark_id: %s\nstarted_at: %s\nduration: %s\nconcurrent_clients: %d\ncompleted_requests: %d\n",
+		filepath.Base(resultDir), start.Format(time.RFC3339), *flagBenchDuration, *flagBenchConcurrent, completedRequests,
+	)
+	return os.WriteFile(filepath.Join(resultDir, start.Format("2006-01-02_15-04-05")+".txt"), []byte(result), 0o644)
+}
+
+func percentileIndex(length, percentile int) int {
+	index := length * percentile / 100
+	if index == length {
+		return length - 1
+	}
+	return index
+}
+
+func collectProfiles(ctx context.Context, resultDir string, debugAddrMap map[NodeId]string) {
+	var collector benchmarkProfileCollector
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case capturedAt := <-ticker.C:
+			var profiles sync.WaitGroup
+			for nodeID, debugAddr := range debugAddrMap {
+				for _, profileType := range []string{"profile", "allocs", "heap", "goroutine"} {
+					profiles.Add(1)
+					go func() {
+						defer profiles.Done()
+						collector.collectNodeProfile(ctx, resultDir, nodeID, debugAddr, profileType, capturedAt)
+					}()
+				}
+			}
+			profiles.Wait()
+		}
+	}
+}
+
+type benchmarkProfileCollector struct {
+	cpuLocks sync.Map // debug address -> *sync.Mutex; shared even when node IDs differ.
+}
+
+func (c *benchmarkProfileCollector) collectNodeProfile(ctx context.Context, resultDir string, nodeID NodeId, debugAddr, profileType string, capturedAt time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
+	cpuComplete := false
+	if profileType == "profile" {
+		value, _ := c.cpuLocks.LoadOrStore(debugAddr, &sync.Mutex{})
+		lock := value.(*sync.Mutex)
+		if !lock.TryLock() {
+			slog.Warn("skip CPU profile: previous collection is pending or unconfirmed", "node_id", nodeID)
+			return
+		}
+		// A failed download does not prove the remote profiler has stopped.
+		// Keep this address locked for the rest of the run unless it completes.
+		defer func() {
+			if cpuComplete {
+				lock.Unlock()
+			} else if ctx.Err() == nil {
+				slog.Warn("CPU profiling disabled for this run: completion not confirmed", "node_id", nodeID)
+			}
+		}()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	profileURL := "http://" + debugAddr + "/debug/pprof/" + profileType
+	if profileType == "profile" {
+		profileURL += "?seconds=5"
+	}
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, profileURL, nil)
+	if err != nil {
+		slog.Error("create profile request", "node_id", nodeID, "profile", profileType, "err", err)
+		return
+	}
+	req.SetBasicAuth("raft", os.Getenv("PPROF_AUTH"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("collect profile", "node_id", nodeID, "profile", profileType, "err", err)
+		return
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("read profile", "node_id", nodeID, "profile", profileType, "err", readErr)
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("collect profile", "node_id", nodeID, "profile", profileType, "status", resp.Status)
+		return
+	}
+	cpuComplete = true
+	nodeDir := filepath.Join(resultDir, nodeID.String())
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		slog.Error("create profile directory", "node_id", nodeID, "err", err)
+		return
+	}
+	filename := profileType + "_" + capturedAt.Format("15-04-05") + ".prof"
+	if err := os.WriteFile(filepath.Join(nodeDir, filename), body, 0o644); err != nil {
+		slog.Error("save profile", "node_id", nodeID, "profile", profileType, "err", err)
+	}
 }
 
 func command(n int) []byte {
