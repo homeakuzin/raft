@@ -171,6 +171,7 @@ func main() {
 }
 
 func runBenchmarks(ctx context.Context, clientAddrMap map[NodeId]string) error {
+	fmt.Printf("Start benchmark testing %s\n", time.Now().Format(time.DateTime))
 	ctx, cancel := context.WithTimeout(ctx, *flagBenchDuration)
 	defer cancel()
 	clientsSemaphore := make(chan struct{}, *flagBenchConcurrent)
