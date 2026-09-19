@@ -316,7 +316,7 @@ func TestNodeJoinsAfterRestart(t *testing.T) {
 	restartId := snapshot.followerIDs[0]
 	t.Logf("shutdown %s", restartId)
 	cluster.nodesByID(restartId)[0].Shutdown(t.Context())
-	require.NoError(t, leader.ClientCommand(t.Context(), cmd3))
+	require.NoError(t, cluster.leader().ClientCommand(t.Context(), cmd3))
 
 	nodeLogger := logger(t, restartId)
 	ln, err := net.Listen("tcp", addrs[restartId])
