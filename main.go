@@ -25,12 +25,16 @@ import (
 const clientAddrsFlag = "clientaddrs"
 const raftAddrsFlag = "raftaddrs"
 
-var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration")
+var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration (minimum 15s; 0 runs a node)")
 var flagBenchConcurrent = flag.Int("c", 1, "Concurrent clients")
 var flagBenchmarkID = flag.String("benchmarkid", "", "Benchmark result directory name (defaults to date and time)")
 
 func main() {
 	flag.Parse()
+	if *flagBenchDuration != 0 && *flagBenchDuration < 15*time.Second {
+		slog.Error("benchmark duration must be at least 15s", "duration", *flagBenchDuration)
+		os.Exit(1)
+	}
 	clientAddrMap := parseAndValidateAddrs("RAFT_CLIENT_ADDRS")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -182,6 +186,7 @@ func runBenchmarks(ctx context.Context, clientAddrMap, debugAddrMap map[NodeId]s
 		return fmt.Errorf("create benchmark result directory: %w", err)
 	}
 	fmt.Printf("Start benchmark testing %s\n", benchmarkStart.Format(time.DateTime))
+	fmt.Printf("Results will be saved to %s\n", resultDir)
 	ctx, cancel := context.WithTimeout(ctx, *flagBenchDuration)
 	defer cancel()
 	profilesDone := make(chan struct{})
