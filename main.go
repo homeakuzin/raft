@@ -222,9 +222,9 @@ loop:
 	fmt.Printf("Concurrent clients: %d\n", *flagBenchConcurrent)
 	fmt.Printf("Time elapsed: %s\n", time.Since(benchmarkStart).String())
 	fmt.Printf("Latency:\n")
-	fmt.Printf("\tp50: %s (%d)\n", latency[p50Idx].String(), p50Idx)
-	fmt.Printf("\tp90: %s (%d)\n", latency[p90Idx].String(), p90Idx)
-	fmt.Printf("\tp99: %s (%d)\n", latency[p99Idx].String(), p99Idx)
+	fmt.Printf("\tp50: %s\n", latency[p50Idx].String())
+	fmt.Printf("\tp90: %s\n", latency[p90Idx].String())
+	fmt.Printf("\tp99: %s\n", latency[p99Idx].String())
 	return nil
 }
 

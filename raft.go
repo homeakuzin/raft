@@ -232,7 +232,6 @@ func NewNode(id NodeId, peers []NodeId, logger *RaftLogger, transport Transport)
 
 func (n *Node) ClientCommand(ctx context.Context, command []byte) error {
 	c := clientCommand{ctx, command, make(chan error, 1)}
-	defer close(c.replicated)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
