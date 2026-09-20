@@ -412,18 +412,22 @@ func newTestClusterWithLoggerFactory(t testing.TB, loggerFactory func(t testing.
 	listeners := map[NodeId]net.Listener{}
 	addrs := map[NodeId]string{}
 	for _, id := range []NodeId{Node1, Node2, Node3} {
-		ln, err := net.Listen("tcp", "0.0.0.0:0")
+		ln, err := net.Listen("tcp", "localhost:0")
 		require.NoError(t, err)
 
 		listeners[id] = ln
-		addrs[id] = ln.Addr().String()
+		_, port, err := net.SplitHostPort(ln.Addr().String())
+		require.NoError(t, err)
+		addrs[id] = net.JoinHostPort("localhost", port)
 	}
 
 	conditions := newNetworkConditions(t)
 	nodes := make([]*Node, 0, len(listeners))
 	for _, id := range []NodeId{Node1, Node2, Node3} {
 		nodeLogger := loggerFactory(t, id)
-		transport := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
+		// transport := NewHttpTransport(listeners[id], id, addrs, nodeLogger)
+		transport, err := NewHttp2Transport(listeners[id], id, addrs, nodeLogger, "certs/cert.pem", "certs/key.pem")
+		require.NoError(t, err)
 		node := NewNode(id, peersFor(id), nodeLogger, withNetworkConditions(id, transport, conditions)).
 			SetTimeouts(testingTimeouts)
 		nodes = append(nodes, node)

@@ -29,6 +29,8 @@ const raftAddrsFlag = "raftaddrs"
 var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration (minimum 15s; 0 runs a node)")
 var flagBenchConcurrent = flag.Int("c", 1, "Concurrent clients")
 var flagBenchmarkID = flag.String("benchmarkid", "", "Benchmark result directory name (defaults to date and time)")
+var flagCertFile = flag.String("certfile", "", "")
+var flagKeyFile = flag.String("keyfile", "", "")
 
 func main() {
 	flag.Parse()
@@ -164,7 +166,12 @@ func main() {
 	if debugLevel != "" {
 		slog.Info("debug level", "level", debugLevel)
 	}
-	tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
+	// tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
+	tr, err := NewHttp2Transport(ln, nodeId, raftAddrMap, raftLogger, *flagCertFile, *flagKeyFile)
+	if err != nil {
+		slog.Error("could not create http2 transport", "err", err)
+		os.Exit(1)
+	}
 	node := NewNode(nodeId, otherIds(raftAddrMap, nodeId), raftLogger, tr)
 	version, err := strconv.ParseInt(buildVersion, 10, 64)
 	if err != nil {

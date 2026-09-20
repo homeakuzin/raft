@@ -39,7 +39,7 @@ jobs:
             - name: Build and push
               run: |
                   image="${REGISTRY}/raft:latest"
-                  docker build -t "$image" .
+                  docker build --build-arg "TLS_HOSTS=localhost ${DEPLOY_HOSTS}" -t "$image" .
                   docker push "$image"
 
     deploy:
