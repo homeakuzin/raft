@@ -23,8 +23,15 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 )
 
-const clientAddrsFlag = "clientaddrs"
-const raftAddrsFlag = "raftaddrs"
+var flagClientAddrs = flag.String("clientaddrs", "", "Client addresses: id:host:port,id:host:port,id:host:port (required)")
+var flagRaftAddrs = flag.String("raftaddrs", "", "Raft addresses: id:host:port,id:host:port,id:host:port (required for a node)")
+var flagDebugAddrs = flag.String("debugaddrs", "", "Pprof addresses: id:host:port,id:host:port,id:host:port (required for benchmarks)")
+var flagNodeID = flag.String("nodeid", "", "Current node ID (required for a node)")
+var flagMetricsAddr = flag.String("metricsaddr", "", "Prometheus metrics listen address")
+var flagOTELExportAddr = flag.String("otelexportaddr", "", "OpenTelemetry trace export address")
+var flagPprofAddr = flag.String("pprofaddr", "", "Pprof listen address (requires pprofauth)")
+var flagPprofAuth = flag.String("pprofauth", "", "Pprof authentication token for server and benchmark collector")
+var flagDebug = flag.Int("raftdebug", 0, "Raft debug level (0-3)")
 
 var flagBenchDuration = flag.Duration("d", 0, "Benchmark duration (minimum 15s; 0 runs a node)")
 var flagBenchConcurrent = flag.Int("c", 1, "Concurrent clients")
@@ -34,11 +41,15 @@ var flagKeyFile = flag.String("keyfile", "", "")
 
 func main() {
 	flag.Parse()
+	if *flagDebug < 0 || *flagDebug > 3 {
+		slog.Error("debug level must be between 0 and 3", "level", *flagDebug)
+		os.Exit(1)
+	}
 	if *flagBenchDuration != 0 && *flagBenchDuration < 15*time.Second {
 		slog.Error("benchmark duration must be at least 15s", "duration", *flagBenchDuration)
 		os.Exit(1)
 	}
-	clientAddrMap := parseAndValidateAddrs("RAFT_CLIENT_ADDRS")
+	clientAddrMap := parseAndValidateAddrs("clientaddrs", *flagClientAddrs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -50,7 +61,7 @@ func main() {
 	slog.SetDefault(slog.New(handler))
 
 	if *flagBenchDuration > 0 {
-		debugAddrMap := parseAndValidateAddrs("RAFT_DEBUG_ADDRS")
+		debugAddrMap := parseAndValidateAddrs("debugaddrs", *flagDebugAddrs)
 		err := runBenchmarks(ctx, clientAddrMap, debugAddrMap)
 		if err != nil {
 			slog.Error("benchmark error", "err", err.Error())
@@ -59,15 +70,15 @@ func main() {
 		return
 	}
 
-	nodeId := NodeId(os.Getenv("RAFT_NODE_ID"))
+	nodeId := NodeId(*flagNodeID)
 	if nodeId == None {
-		slog.Error("expected RAFT_NODE_ID")
+		slog.Error("expected -nodeid")
 		os.Exit(1)
 	}
 
 	slog.SetDefault(slog.New(handler).With("node_id", nodeId))
 
-	raftAddrMap := parseAndValidateAddrs("RAFT_ADDRS")
+	raftAddrMap := parseAndValidateAddrs("raftaddrs", *flagRaftAddrs)
 	if _, ok := raftAddrMap[nodeId]; !ok {
 		slog.Error("invalid addrs value", "err", "addr not provided for current node")
 		os.Exit(1)
@@ -79,7 +90,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	prometheusAddr := os.Getenv("PROMETHEUS_METRICS_ADDR")
+	prometheusAddr := *flagMetricsAddr
 	if prometheusAddr != "" {
 		go func() {
 			mux := http.NewServeMux()
@@ -95,7 +106,7 @@ func main() {
 		}()
 	}
 
-	otelExportAddr := os.Getenv("OTEL_EXPORT_ADDR")
+	otelExportAddr := *flagOTELExportAddr
 	if otelExportAddr != "" {
 		serviceName := "raft"
 		slog.Info("exporting opentelemetry traces", "addr", otelExportAddr, "service_name", serviceName)
@@ -107,8 +118,8 @@ func main() {
 		defer traceProvider.Shutdown(ctx)
 	}
 
-	pprofAddr := os.Getenv("PPROF_ADDR")
-	pprofAuth := os.Getenv("PPROF_AUTH")
+	pprofAddr := *flagPprofAddr
+	pprofAuth := *flagPprofAuth
 	if pprofAddr != "" && pprofAuth != "" {
 		go func() {
 			var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
@@ -154,17 +165,9 @@ func main() {
 		os.Exit(1)
 	}
 	raftLogger := NewRaftLogger(slog.Default())
-	debugLevel := os.Getenv("RAFT_DEBUG")
-	switch debugLevel {
-	case "1":
-		raftLogger.DebugLevel(1)
-	case "2":
-		raftLogger.DebugLevel(2)
-	case "3":
-		raftLogger.DebugLevel(3)
-	}
-	if debugLevel != "" {
-		slog.Info("debug level", "level", debugLevel)
+	if *flagDebug != 0 {
+		raftLogger.DebugLevel(*flagDebug)
+		slog.Info("debug level", "level", *flagDebug)
 	}
 	// tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
 	tr, err := NewHttp2Transport(ln, nodeId, raftAddrMap, raftLogger, *flagCertFile, *flagKeyFile)
@@ -366,7 +369,7 @@ func (c *benchmarkProfileCollector) collectNodeProfile(ctx context.Context, resu
 		slog.Error("create profile request", "node_id", nodeID, "profile", profileType, "err", err)
 		return
 	}
-	req.SetBasicAuth("raft", os.Getenv("PPROF_AUTH"))
+	req.SetBasicAuth("raft", *flagPprofAuth)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -509,19 +512,18 @@ func otherIds(addrs map[NodeId]string, nodeId NodeId) []NodeId {
 	return ids
 }
 
-func parseAndValidateAddrs(envName string) map[NodeId]string {
-	value := os.Getenv(envName)
+func parseAndValidateAddrs(flagName, value string) map[NodeId]string {
 	if value == "" {
-		slog.Error("addrs required", "name", envName)
+		slog.Error("addrs required", "flag", flagName)
 		os.Exit(1)
 	}
 	result, err := parseAddrsFlag(value)
 	if err != nil {
-		slog.Error("invalid addrs value", "value", value, "err", err, "name", envName)
+		slog.Error("invalid addrs value", "value", value, "err", err, "flag", flagName)
 		os.Exit(1)
 	}
 	if len(result) != 3 {
-		slog.Error("invalid addrs value", "value", value, "err", "expected exactly 3 nodes", "actual", len(result), "name", envName)
+		slog.Error("invalid addrs value", "value", value, "err", "expected exactly 3 nodes", "actual", len(result), "flag", flagName)
 		os.Exit(1)
 	}
 	return result
