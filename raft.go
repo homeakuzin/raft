@@ -564,6 +564,7 @@ func (n *Node) sendAppendEntries(ctx context.Context) {
 				EndSpanWithError(span, err)
 				return
 			}
+			span.SetAttributes(attribute.Bool("success", reply.Success))
 			reply.Peer = peer
 			reply.entriesBounds.from = entriesIndexFrom
 			reply.entriesBounds.to = entriesIndexTo
@@ -607,6 +608,7 @@ func (n *Node) startElection(ctx context.Context, replyCh chan<- RequestVoteRepl
 				EndSpanWithError(span, err)
 				return
 			}
+			span.SetAttributes(attribute.Bool("success", reply.VoteGranted))
 			reply.Peer = peer
 			replyCh <- reply
 			span.End()
