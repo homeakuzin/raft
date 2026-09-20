@@ -286,7 +286,8 @@ func writeBenchmarkResult(resultDir string, start time.Time, completedRequests i
 		"benchmark_id: %s\nstarted_at: %s\nduration: %s\nconcurrent_clients: %d\ncompleted_requests: %d\n",
 		filepath.Base(resultDir), start.Format(time.RFC3339), *flagBenchDuration, *flagBenchConcurrent, completedRequests,
 	)
-	return os.WriteFile(filepath.Join(resultDir, start.Format("2006-01-02_15-04-05")+".txt"), []byte(result), 0o644)
+	filename := fmt.Sprintf("%s_%s_%d.txt", start.Format("2006-01-02_15-04-05"), *flagBenchDuration, *flagBenchConcurrent)
+	return os.WriteFile(filepath.Join(resultDir, filename), []byte(result), 0o644)
 }
 
 func percentileIndex(length, percentile int) int {

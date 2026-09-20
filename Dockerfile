@@ -10,7 +10,7 @@ ENTRYPOINT ["/raft.test", "-test.v"]
 
 FROM base AS build
 RUN CGO_ENABLED=0 go build \
-    -ldflags "-X main.buildVersion=$(date -u +%s)" \
+    -ldflags "-X main.buildVersion=$(date -u +%Y%m%d%H%M%S)" \
     -o /raft .
 
 FROM scratch AS main
