@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,6 +166,14 @@ func main() {
 	}
 	tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
 	node := NewNode(nodeId, otherIds(raftAddrMap, nodeId), raftLogger, tr)
+	version, err := strconv.ParseInt(buildVersion, 10, 64)
+	if err != nil {
+		slog.Error("invalid build version", "version", buildVersion, "err", err)
+		os.Exit(1)
+	}
+	metrics.GetOrCreateGauge("raft_version", func() float64 {
+		return float64(version)
+	})
 	metrics.GetOrCreateGauge("raft_state", func() float64 {
 		return node.State().Float64()
 	})

@@ -9,7 +9,9 @@ RUN CGO_ENABLED=1 go test . -c -race -o /raft.test
 ENTRYPOINT ["/raft.test", "-test.v"]
 
 FROM base AS build
-RUN CGO_ENABLED=0 go build -o /raft .
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X main.buildVersion=$(date -u +%s)" \
+    -o /raft .
 
 FROM scratch AS main
 COPY --from=build /raft /raft
