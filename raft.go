@@ -703,7 +703,7 @@ func (h httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(500)
-		h.logger.ErrorContext(r.Context(), "could not read request body", "error", err)
+		h.logger.ErrorContext(r.Context(), "could not read request body", "error", err, "uri", r.RequestURI, "remote_addr", r.RemoteAddr)
 		return
 	}
 
