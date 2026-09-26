@@ -169,8 +169,8 @@ func main() {
 		raftLogger.DebugLevel(*flagDebug)
 		slog.Info("debug level", "level", *flagDebug)
 	}
-	tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
-	// tr, err := NewHttp2Transport(ln, nodeId, raftAddrMap, raftLogger, *flagCertFile, *flagKeyFile)
+	// tr := NewHttpTransport(ln, nodeId, raftAddrMap, raftLogger)
+	tr, err := NewHttp2Transport(ln, nodeId, raftAddrMap, raftLogger, *flagCertFile, *flagKeyFile)
 	if err != nil {
 		slog.Error("could not create http2 transport", "err", err)
 		os.Exit(1)
